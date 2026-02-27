@@ -314,6 +314,11 @@ async def refresh_whoop_token(refresh_token: str) -> str | None:
 # Endpoints
 # ---------------------------------------------------------------------------
 
+@app.get("/")
+async def root():
+    return RedirectResponse(url="/auth/whoop")
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
