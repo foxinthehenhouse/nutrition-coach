@@ -362,30 +362,54 @@ async def auth_whoop_callback(
         )
     if state and state in _oauth_states:
         _oauth_states.discard(state)
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            WHOOP_TOKEN_URL,
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": WHOOP_REDIRECT_URI,
-                "client_id": WHOOP_CLIENT_ID,
-                "client_secret": WHOOP_CLIENT_SECRET,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                WHOOP_TOKEN_URL,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": WHOOP_REDIRECT_URI,
+                    "client_id": WHOOP_CLIENT_ID,
+                    "client_secret": WHOOP_CLIENT_SECRET,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            if resp.status_code != 200:
+                logger.error(f"WHOOP token exchange failed: {resp.status_code} {resp.text}")
+                return JSONResponse(
+                    status_code=502,
+                    content={
+                        "error": "Token exchange failed",
+                        "whoop_status": resp.status_code,
+                        "whoop_response": resp.text,
+                    },
+                )
+            data = resp.json()
+    except Exception as e:
+        logger.error(f"WHOOP token exchange request failed: {e}")
+        return JSONResponse(
+            status_code=502,
+            content={"error": f"Token exchange request failed: {str(e)}"},
         )
-        resp.raise_for_status()
-        data = resp.json()
 
-    new_expires = datetime.now(timezone.utc).timestamp() + data["expires_in"]
-    expires_at = datetime.fromtimestamp(new_expires, tz=timezone.utc).isoformat()
+    try:
+        new_expires = datetime.now(timezone.utc).timestamp() + data["expires_in"]
+        expires_at = datetime.fromtimestamp(new_expires, tz=timezone.utc).isoformat()
 
-    get_supabase().table("whoop_tokens").upsert({
-        "id": 1,
-        "access_token": data["access_token"],
-        "refresh_token": data["refresh_token"],
-        "expires_at": expires_at,
-    }).execute()
+        get_supabase().table("whoop_tokens").upsert({
+            "id": 1,
+            "access_token": data["access_token"],
+            "refresh_token": data["refresh_token"],
+            "expires_at": expires_at,
+        }).execute()
+    except Exception as e:
+        logger.error(f"Failed to store WHOOP tokens in Supabase: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Failed to store tokens: {str(e)}"},
+        )
 
     return {"status": "connected", "message": "Whoop OAuth2 tokens stored successfully"}
 
