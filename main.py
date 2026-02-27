@@ -39,9 +39,30 @@ WHOOP_AUTH_URL = "https://api.prod.whoop.com/oauth/oauth2/auth"
 WHOOP_TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token"
 WHOOP_SCOPES = "read:recovery read:cycles read:workout read:sleep read:profile read:body_measurement"
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
-twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+_supabase: Client | None = None
+_twilio_client: TwilioClient | None = None
+_claude_client: anthropic.Anthropic | None = None
+
+
+def get_supabase() -> Client:
+    global _supabase
+    if _supabase is None:
+        _supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
+    return _supabase
+
+
+def get_twilio() -> TwilioClient:
+    global _twilio_client
+    if _twilio_client is None:
+        _twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    return _twilio_client
+
+
+def get_claude() -> anthropic.Anthropic:
+    global _claude_client
+    if _claude_client is None:
+        _claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    return _claude_client
 
 
 def get_mem0() -> Memory:
@@ -68,14 +89,14 @@ def get_mem0() -> Memory:
 
 
 def get_settings() -> dict:
-    result = supabase.table("settings").select("*").execute()
+    result = get_supabase().table("settings").select("*").execute()
     return {row["key"]: row["value"] for row in result.data}
 
 
 def get_today_food_log() -> tuple[list[dict], dict]:
     today_str = date.today().isoformat()
     result = (
-        supabase.table("food_log")
+        get_supabase().table("food_log")
         .select("*")
         .eq("date", today_str)
         .execute()
@@ -93,7 +114,7 @@ def get_today_food_log() -> tuple[list[dict], dict]:
 def get_today_whoop_cache() -> dict | None:
     today_str = date.today().isoformat()
     result = (
-        supabase.table("whoop_cache")
+        get_supabase().table("whoop_cache")
         .select("*")
         .eq("date", today_str)
         .execute()
@@ -211,7 +232,7 @@ def parse_meal_data(response_text: str) -> tuple[str, dict | None]:
 
 def log_food(meal_data: dict):
     now = datetime.now(timezone.utc)
-    supabase.table("food_log").insert({
+    get_supabase().table("food_log").insert({
         "date": date.today().isoformat(),
         "time": now.strftime("%H:%M:%S"),
         "description": meal_data.get("description", ""),
@@ -224,14 +245,14 @@ def log_food(meal_data: dict):
 
 
 def log_conversation(direction: str, message: str):
-    supabase.table("conversation_log").insert({
+    get_supabase().table("conversation_log").insert({
         "direction": direction,
         "message": message,
     }).execute()
 
 
 def send_sms(to: str, body: str):
-    twilio_client.messages.create(
+    get_twilio().messages.create(
         body=body,
         from_=TWILIO_PHONE_NUMBER,
         to=to,
@@ -239,7 +260,7 @@ def send_sms(to: str, body: str):
 
 
 async def get_whoop_token() -> str | None:
-    result = supabase.table("whoop_tokens").select("*").eq("id", 1).execute()
+    result = get_supabase().table("whoop_tokens").select("*").eq("id", 1).execute()
     if not result.data:
         logger.error("No Whoop tokens found in database")
         return None
@@ -275,7 +296,7 @@ async def refresh_whoop_token(refresh_token: str) -> str | None:
         new_expires = datetime.now(timezone.utc).timestamp() + data["expires_in"]
         expires_at = datetime.fromtimestamp(new_expires, tz=timezone.utc).isoformat()
 
-        supabase.table("whoop_tokens").upsert({
+        get_supabase().table("whoop_tokens").upsert({
             "id": 1,
             "access_token": data["access_token"],
             "refresh_token": data.get("refresh_token", refresh_token),
@@ -329,7 +350,7 @@ async def auth_whoop_callback(code: str):
     new_expires = datetime.now(timezone.utc).timestamp() + data["expires_in"]
     expires_at = datetime.fromtimestamp(new_expires, tz=timezone.utc).isoformat()
 
-    supabase.table("whoop_tokens").upsert({
+    get_supabase().table("whoop_tokens").upsert({
         "id": 1,
         "access_token": data["access_token"],
         "refresh_token": data["refresh_token"],
@@ -450,7 +471,7 @@ async def sync_whoop():
         if v is not None:
             upsert_payload[k] = v
 
-    supabase.table("whoop_cache").upsert(upsert_payload, on_conflict="date").execute()
+    get_supabase().table("whoop_cache").upsert(upsert_payload, on_conflict="date").execute()
 
     return {"status": "synced", "data": whoop_data}
 
@@ -477,7 +498,7 @@ async def webhook_sms(request: Request):
 
     system_prompt = build_system_prompt(settings, whoop_data, food_rows, food_totals, memories)
 
-    response = claude_client.messages.create(
+    response = get_claude().messages.create(
         model="claude-opus-4-6",
         max_tokens=512,
         system=system_prompt,
@@ -534,7 +555,7 @@ async def checkin():
         "and remaining calories. Keep it under 300 characters."
     )
 
-    response = claude_client.messages.create(
+    response = get_claude().messages.create(
         model="claude-opus-4-6",
         max_tokens=512,
         system=system_prompt,
@@ -576,7 +597,7 @@ async def summary():
         "Keep it under 320 characters."
     )
 
-    response = claude_client.messages.create(
+    response = get_claude().messages.create(
         model="claude-opus-4-6",
         max_tokens=512,
         system=system_prompt,
