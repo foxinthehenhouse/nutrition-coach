@@ -336,7 +336,22 @@ async def auth_whoop():
 
 
 @app.get("/auth/whoop/callback")
-async def auth_whoop_callback(code: str):
+async def auth_whoop_callback(
+    code: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+):
+    if error:
+        logger.error(f"WHOOP OAuth error: {error} — {error_description}")
+        return JSONResponse(
+            status_code=400,
+            content={"error": error, "description": error_description},
+        )
+    if not code:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "No authorization code received from WHOOP"},
+        )
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             WHOOP_TOKEN_URL,
