@@ -395,15 +395,20 @@ async def auth_whoop_callback(
         )
 
     try:
-        new_expires = datetime.now(timezone.utc).timestamp() + data["expires_in"]
+        logger.info(f"WHOOP token response keys: {list(data.keys())}")
+        expires_in = data.get("expires_in", 3600)
+        new_expires = datetime.now(timezone.utc).timestamp() + expires_in
         expires_at = datetime.fromtimestamp(new_expires, tz=timezone.utc).isoformat()
 
-        get_supabase().table("whoop_tokens").upsert({
+        token_row = {
             "id": 1,
             "access_token": data["access_token"],
-            "refresh_token": data["refresh_token"],
             "expires_at": expires_at,
-        }).execute()
+        }
+        if data.get("refresh_token"):
+            token_row["refresh_token"] = data["refresh_token"]
+
+        get_supabase().table("whoop_tokens").upsert(token_row).execute()
     except Exception as e:
         logger.error(f"Failed to store WHOOP tokens in Supabase: {e}")
         return JSONResponse(
