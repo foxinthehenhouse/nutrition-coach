@@ -2,6 +2,7 @@ import os
 import re
 import json
 import logging
+import secrets
 from datetime import datetime, timezone, date, time as dt_time
 from urllib.parse import urlencode, urlparse
 
@@ -324,13 +325,19 @@ async def health():
     return {"status": "ok"}
 
 
+_oauth_states: set[str] = set()
+
+
 @app.get("/auth/whoop")
 async def auth_whoop():
+    state = secrets.token_urlsafe(32)
+    _oauth_states.add(state)
     params = {
         "client_id": WHOOP_CLIENT_ID,
         "redirect_uri": WHOOP_REDIRECT_URI,
         "response_type": "code",
         "scope": WHOOP_SCOPES,
+        "state": state,
     }
     return RedirectResponse(url=f"{WHOOP_AUTH_URL}?{urlencode(params)}")
 
@@ -338,6 +345,7 @@ async def auth_whoop():
 @app.get("/auth/whoop/callback")
 async def auth_whoop_callback(
     code: str | None = None,
+    state: str | None = None,
     error: str | None = None,
     error_description: str | None = None,
 ):
@@ -352,6 +360,8 @@ async def auth_whoop_callback(
             status_code=400,
             content={"error": "No authorization code received from WHOOP"},
         )
+    if state and state in _oauth_states:
+        _oauth_states.discard(state)
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             WHOOP_TOKEN_URL,
