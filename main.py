@@ -15,6 +15,7 @@ from urllib.parse import urlencode
 import httpx
 import openai
 import anthropic
+import imageio_ffmpeg
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -295,7 +296,7 @@ async def transcribe_audio(media_url: str, content_type: str) -> str:
         output_path = input_path.rsplit(".", 1)[0] + ".mp3"
 
         result = subprocess.run(
-            ["ffmpeg", "-y", "-i", input_path, "-f", "mp3", "-ac", "1", "-ar", "16000", output_path],
+            [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-i", input_path, "-f", "mp3", "-ac", "1", "-ar", "16000", output_path],
             capture_output=True, timeout=30,
         )
         if result.returncode != 0:
