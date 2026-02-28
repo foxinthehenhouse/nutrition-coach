@@ -22,6 +22,16 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Nutrition Coach SMS Bot")
 
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled error on {request.url.path}: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"error": str(exc), "type": type(exc).__name__, "path": str(request.url.path)},
+    )
+
+
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
@@ -537,59 +547,67 @@ async def sync_whoop():
 
 @app.post("/webhook/sms")
 async def webhook_sms(request: Request):
-    form = await request.form()
-    incoming_message = form.get("Body", "")
-    from_number = form.get("From", "")
-
-    logger.info(f"SMS from {from_number}: {incoming_message}")
-
-    settings = get_settings()
-    food_rows, food_totals = get_today_food_log()
-    whoop_data = get_today_whoop_cache()
-
     try:
-        memory = get_mem0()
-        memories_result = memory.search(query=incoming_message, user_id="kyle")
-        memories = memories_result if isinstance(memories_result, list) else []
-    except Exception as e:
-        logger.error(f"Mem0 search failed: {e}")
-        memories = []
+        form = await request.form()
+        incoming_message = form.get("Body", "")
+        from_number = form.get("From", "")
 
-    system_prompt = build_system_prompt(settings, whoop_data, food_rows, food_totals, memories)
+        logger.info(f"SMS from {from_number}: {incoming_message}")
 
-    response = get_claude().messages.create(
-        model="claude-opus-4-6",
-        max_tokens=512,
-        system=system_prompt,
-        messages=[{"role": "user", "content": incoming_message}],
-    )
-    claude_response = response.content[0].text
+        settings = get_settings()
+        food_rows, food_totals = get_today_food_log()
+        whoop_data = get_today_whoop_cache()
 
-    clean_message, meal_data = parse_meal_data(claude_response)
+        try:
+            memory = get_mem0()
+            memories_result = memory.search(query=incoming_message, user_id="kyle")
+            memories = memories_result if isinstance(memories_result, list) else []
+        except Exception as e:
+            logger.error(f"Mem0 search failed: {e}")
+            memories = []
 
-    if meal_data:
-        log_food(meal_data)
+        system_prompt = build_system_prompt(settings, whoop_data, food_rows, food_totals, memories)
 
-    send_sms(to=from_number, body=clean_message)
-
-    log_conversation("inbound", incoming_message)
-    log_conversation("outbound", claude_response)
-
-    try:
-        memory = get_mem0()
-        memory.add(
-            messages=[
-                {"role": "user", "content": incoming_message},
-                {"role": "assistant", "content": claude_response},
-            ],
-            user_id="kyle",
+        response = get_claude().messages.create(
+            model="claude-opus-4-6",
+            max_tokens=512,
+            system=system_prompt,
+            messages=[{"role": "user", "content": incoming_message}],
         )
-    except Exception as e:
-        logger.error(f"Mem0 add failed: {e}")
+        claude_response = response.content[0].text
 
-    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+        clean_message, meal_data = parse_meal_data(claude_response)
+
+        if meal_data:
+            log_food(meal_data)
+
+        send_sms(to=from_number, body=clean_message)
+
+        log_conversation("inbound", incoming_message)
+        log_conversation("outbound", claude_response)
+
+        try:
+            memory = get_mem0()
+            memory.add(
+                messages=[
+                    {"role": "user", "content": incoming_message},
+                    {"role": "assistant", "content": claude_response},
+                ],
+                user_id="kyle",
+            )
+        except Exception as e:
+            logger.error(f"Mem0 add failed: {e}")
+
+        twiml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response></Response>"""
-    return Response(content=twiml, media_type="application/xml")
+        return Response(content=twiml, media_type="application/xml")
+
+    except Exception as e:
+        logger.error(f"Webhook error: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "type": type(e).__name__},
+        )
 
 
 @app.post("/checkin")
