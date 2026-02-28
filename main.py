@@ -57,7 +57,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WHOOP_BASE_URL = "https://api.prod.whoop.com/developer"
 WHOOP_AUTH_URL = "https://api.prod.whoop.com/oauth/oauth2/auth"
 WHOOP_TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token"
-WHOOP_SCOPES = "read:recovery read:cycles read:workout read:sleep read:profile read:body_measurement"
+WHOOP_SCOPES = "offline read:recovery read:cycles read:workout read:sleep read:profile read:body_measurement"
 
 USER_ID = "kyle"
 
