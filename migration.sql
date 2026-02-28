@@ -76,7 +76,8 @@ create table if not exists conversation_log (
   created_at timestamptz default now(),
   direction text,
   message text,
-  flow text
+  flow text,
+  source text
 );
 
 -- Whoop OAuth tokens
@@ -86,6 +87,17 @@ create table if not exists whoop_tokens (
   refresh_token text,
   expires_at timestamptz
 );
+
+-- Add columns to existing tables (safe to run on fresh or existing databases)
+ALTER TABLE conversation_log ADD COLUMN IF NOT EXISTS source text;
+ALTER TABLE conversation_log ADD COLUMN IF NOT EXISTS flow text;
+ALTER TABLE food_log ADD COLUMN IF NOT EXISTS meal_type text;
+ALTER TABLE food_log ADD COLUMN IF NOT EXISTS fiber_g numeric;
+ALTER TABLE food_log ADD COLUMN IF NOT EXISTS sodium_mg numeric;
+ALTER TABLE food_log ADD COLUMN IF NOT EXISTS sugar_g numeric;
+ALTER TABLE whoop_cache ADD COLUMN IF NOT EXISTS workout_type text;
+ALTER TABLE whoop_cache ADD COLUMN IF NOT EXISTS workout_strain numeric;
+ALTER TABLE whoop_cache ADD COLUMN IF NOT EXISTS workout_kcal numeric;
 
 -- Weekly and monthly pattern summaries
 create table if not exists pattern_summaries (
