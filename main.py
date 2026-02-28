@@ -818,8 +818,15 @@ async def handle_image_entry(image_data: dict, from_number: str):
     strain = whoop.get("strain_score", 0) if whoop else 0
     calorie_target = get_calorie_target(strain, settings)
 
-    memory = get_mem0()
-    food_memories = memory.search("preferred foods and typical meals", user_id=USER_ID)
+    try:
+        memory = get_mem0()
+        food_memories_raw = memory.search("preferred foods and typical meals", user_id=USER_ID)
+        food_memories = food_memories_raw if isinstance(food_memories_raw, list) else []
+        food_memories_str = [m.get("memory", str(m)) for m in food_memories] if food_memories else []
+    except Exception as e:
+        logger.warning(f"Mem0 search failed in handle_image_entry: {e}")
+        food_memories_str = []
+
     recent_meals = await get_recent_food_log_descriptions(today, limit=3)
 
     context = {
@@ -830,7 +837,7 @@ async def handle_image_entry(image_data: dict, from_number: str):
         "protein_target": settings.get("protein_goal_g", 160),
         "carb_target": settings.get("carb_goal_g", 220),
         "fat_target": settings.get("fat_goal_g", 70),
-        "food_memories": [m["memory"] for m in food_memories] if food_memories else [],
+        "food_memories": food_memories_str,
         "recent_meals": recent_meals,
         "recovery_score": whoop.get("recovery_score") if whoop else None,
         "daily_plan": daily_plan,
@@ -845,13 +852,20 @@ async def handle_image_entry(image_data: dict, from_number: str):
     except ValueError as e:
         send_sms(to=from_number, body=str(e))
         return
+    except Exception as e:
+        logger.error(f"analyze_meal_image failed: {type(e).__name__}: {e}", exc_info=True)
+        raise
 
-    await update_conversation_state_by_phone(
-        from_number,
-        flow="image_confirmation",
-        step=1,
-        context={"pending_meal": analysis, "from_number": from_number},
-    )
+    try:
+        await update_conversation_state_by_phone(
+            from_number,
+            flow="image_confirmation",
+            step=1,
+            context={"pending_meal": analysis, "from_number": from_number},
+        )
+    except Exception as e:
+        logger.error(f"update_conversation_state_by_phone failed: {e}", exc_info=True)
+        raise
 
     sms = analysis.get(
         "sms_confirmation",
@@ -1616,7 +1630,8 @@ async def process_sms_webhook(
 
         elif num_media > 0 and media_content_type.startswith("image/"):
             try:
-                async with httpx.AsyncClient() as client:
+                logger.info(f"Downloading image from {media_url[:80]}...")
+                async with httpx.AsyncClient(timeout=30.0) as client:
                     img_response = await client.get(
                         media_url,
                         auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
@@ -1624,12 +1639,23 @@ async def process_sms_webhook(
                     img_response.raise_for_status()
                     image_bytes = img_response.content
                     image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-                image_data = {"base64": image_base64, "content_type": media_content_type}
+                content_type = media_content_type.split(";")[0].strip() or "image/jpeg"
+                if not content_type.startswith("image/"):
+                    content_type = "image/jpeg"
+                image_data = {"base64": image_base64, "content_type": content_type}
+                logger.info(f"Image downloaded: {len(image_bytes)} bytes, type={content_type}")
                 await process_message("__IMAGE_MEAL__", from_number, input_source="image", image_data=image_data)
                 return
+            except httpx.HTTPStatusError as e:
+                logger.error(f"Image download HTTP error: {e.response.status_code} {e.response.text[:200]}")
+                send_sms(to=from_number, body="Couldn't download the photo from your message. Try again or describe your meal in text.")
+                return
             except Exception as e:
-                logger.error(f"Image download/analysis failed: {e}", exc_info=True)
-                send_sms(to=from_number, body="Couldn't process that photo. Try again or describe your meal in text.")
+                logger.error(f"Image download/analysis failed: {type(e).__name__}: {e}", exc_info=True)
+                err_msg = "Couldn't process that photo. Try again or describe your meal in text."
+                if os.getenv("IMAGE_DEBUG"):
+                    err_msg += f" ({type(e).__name__}: {str(e)[:80]})"
+                send_sms(to=from_number, body=err_msg)
                 return
 
         elif num_media > 0 and media_content_type:
