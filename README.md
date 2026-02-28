@@ -9,6 +9,7 @@ A personal sports dietitian SMS bot built with FastAPI that integrates WHOOP bio
 - **Mem0** — persistent AI memory layer (pgvector backend)
 - **Anthropic Claude** — nutrition coaching LLM
 - **Twilio** — SMS send/receive
+- **OpenAI Whisper** — voice note transcription
 - **WHOOP** — biometric data (strain, recovery, sleep, HRV, workouts)
 
 ## Endpoints
@@ -153,8 +154,24 @@ Run `migration.sql` to create all tables. The schema includes:
 - **settings** — key/value configuration
 - **food_log** — daily food entries with full macros (incl. fiber, sodium, sugar)
 - **whoop_cache** — cached WHOOP biometric data per day (incl. workout details)
-- **conversation_log** — SMS conversation history with flow tracking
+- **conversation_log** — SMS conversation history with flow tracking and source (text/voice)
 - **whoop_tokens** — OAuth2 tokens for WHOOP API
 - **daily_plans** — daily intentions, training plans, meal plans, macro targets
 - **conversation_state** — state machine for multi-step conversation flows
 - **pattern_summaries** — weekly and monthly trend analysis results
+
+## Voice Note Support
+
+The bot supports voice notes sent as audio MMS. When a voice note is received, it's automatically transcribed using OpenAI Whisper and processed exactly like a text message.
+
+**Supported formats:** OGG, MP4, MP3, AMR, WAV, WebM
+
+**How to test:**
+
+1. On iPhone, open Messages and text your Twilio number
+2. Press and hold the microphone icon in the message bar to record
+3. Say something like "I just had two scrambled eggs, a piece of sourdough toast with butter, and a black coffee"
+4. Release to send
+5. You should receive a transcription confirmation and calorie estimate within 15-20 seconds
+
+**Note:** Standard iMessage audio messages may not send as MMS to a Twilio number depending on carrier. If voice notes aren't being received, use WhatsApp connected to the same Twilio number, or use Wispr Flow to transcribe on-device before sending as text.

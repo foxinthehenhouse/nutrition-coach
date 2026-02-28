@@ -11,6 +11,7 @@ from datetime import datetime, timezone, date, time as dt_time, timedelta
 from urllib.parse import urlencode
 
 import httpx
+import openai
 import anthropic
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response, BackgroundTasks
@@ -228,12 +229,11 @@ def log_food(meal_data: dict):
     }).execute()
 
 
-def log_conversation(direction: str, message: str, flow: str | None = None):
-    get_supabase().table("conversation_log").insert({
-        "direction": direction,
-        "message": message,
-        "flow": flow,
-    }).execute()
+def log_conversation(direction: str, message: str, flow: str | None = None, source: str | None = None):
+    row = {"direction": direction, "message": message, "flow": flow}
+    if source:
+        row["source"] = source
+    get_supabase().table("conversation_log").insert(row).execute()
 
 
 def send_sms(to: str, body: str):
@@ -254,6 +254,40 @@ def parse_meal_data(response_text: str) -> tuple[str, dict | None]:
         except json.JSONDecodeError:
             logger.error("Failed to parse meal JSON from Claude response")
     return response_text, None
+
+
+# ---------------------------------------------------------------------------
+# Voice note transcription
+# ---------------------------------------------------------------------------
+
+AUDIO_EXTENSION_MAP = {
+    "audio/ogg": "ogg",
+    "audio/mp4": "mp4",
+    "audio/mpeg": "mp3",
+    "audio/amr": "amr",
+    "audio/wav": "wav",
+    "audio/webm": "webm",
+}
+
+
+async def transcribe_audio(media_url: str, content_type: str) -> str:
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            media_url,
+            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+        )
+        response.raise_for_status()
+        audio_bytes = response.content
+
+    extension = AUDIO_EXTENSION_MAP.get(content_type, "mp4")
+
+    openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    transcript = openai_client.audio.transcriptions.create(
+        model="whisper-1",
+        file=(f"audio.{extension}", audio_bytes, content_type),
+        prompt="This is a meal description for nutrition tracking. The speaker may mention food names, quantities, portion sizes, and meal types.",
+    )
+    return transcript.text
 
 
 # ---------------------------------------------------------------------------
@@ -1019,10 +1053,25 @@ def verify_whoop_signature(raw_body: bytes, timestamp: str, signature: str) -> b
 # Background task processors
 # ---------------------------------------------------------------------------
 
-async def process_sms_webhook(incoming_message: str, from_number: str):
+async def process_sms_webhook(
+    incoming_message: str,
+    from_number: str,
+    transcription_note: str | None = None,
+    source: str = "text",
+):
     """Process inbound SMS in the background."""
     try:
-        log_conversation("inbound", incoming_message, flow=None)
+        log_msg = f"[Voice]: {incoming_message}" if source == "voice" else incoming_message
+        log_conversation("inbound", log_msg, flow=None, source=source)
+
+        claude_input = incoming_message
+        if transcription_note:
+            claude_input = (
+                "[This message was transcribed from a voice note. The user spoke naturally "
+                "so interpret it generously — 'I just had a big bowl of pasta with meat sauce "
+                "and some garlic bread' should be parsed as a full meal entry, not a question.] "
+                + incoming_message
+            )
 
         state = get_conversation_state()
         flow = state.get("flow", "free_chat")
@@ -1030,15 +1079,14 @@ async def process_sms_webhook(incoming_message: str, from_number: str):
         context = state.get("context") or {}
 
         if flow == "morning_planning" and step > 0:
-            await handle_morning_planning(step, context, user_message=incoming_message)
+            await handle_morning_planning(step, context, user_message=claude_input)
             mem0_add([{"role": "user", "content": incoming_message}])
             return
 
-        # Free chat / no active flow
         await sync_whoop_today()
-        claude_response = build_context_and_call(incoming_message)
+        claude_response = build_context_and_call(claude_input)
         clean_message = process_and_send(claude_response, from_number, flow="free_chat")
-        log_conversation("inbound", incoming_message, flow="free_chat")
+        log_conversation("inbound", log_msg, flow="free_chat", source=source)
 
         mem0_add([
             {"role": "user", "content": incoming_message},
@@ -1199,19 +1247,49 @@ async def sync_whoop():
 
 @app.post("/webhook/sms")
 async def webhook_sms(request: Request, background_tasks: BackgroundTasks):
+    twiml_empty = Response(content='<?xml version="1.0" encoding="UTF-8"?>\n<Response></Response>', media_type="application/xml")
     try:
         form = await request.form()
-        incoming_message = form.get("Body", "")
+        incoming_message = form.get("Body", "").strip()
         from_number = form.get("From", "")
-        logger.info(f"SMS from {from_number}: {incoming_message}")
-        background_tasks.add_task(process_sms_webhook, incoming_message, from_number)
+        num_media = int(form.get("NumMedia", "0"))
+
+        transcription_note = None
+        source = "text"
+
+        if num_media > 0:
+            media_content_type = form.get("MediaContentType0", "")
+            media_url = form.get("MediaUrl0", "")
+
+            if media_content_type.startswith("audio/"):
+                try:
+                    transcribed_text = await transcribe_audio(media_url, media_content_type)
+                    transcription_note = f"[Voice note transcribed: '{transcribed_text}']"
+                    incoming_message = transcribed_text
+                    source = "voice"
+                    logger.info(f"Voice note from {from_number} transcribed: {transcribed_text}")
+                except Exception as e:
+                    logger.error(f"Voice transcription failed: {e}")
+                    send_sms(to=from_number, body="Sorry, I couldn't transcribe that voice note. Try sending a text instead.")
+                    return twiml_empty
+
+            elif media_content_type.startswith("image/"):
+                incoming_message = "The user sent a photo — ask them to describe the meal in text or voice for now."
+                source = "text"
+
+            else:
+                send_sms(to=from_number, body="I can only process voice notes and text right now. Describe your meal by voice or text.")
+                return twiml_empty
+
+        if not incoming_message:
+            return twiml_empty
+
+        logger.info(f"SMS from {from_number} (source={source}): {incoming_message}")
+        background_tasks.add_task(process_sms_webhook, incoming_message, from_number, transcription_note, source)
     except Exception as e:
         logger.error(f"Webhook parse error: {e}", exc_info=True)
 
-    return Response(
-        content='<?xml version="1.0" encoding="UTF-8"?>\n<Response></Response>',
-        media_type="application/xml",
-    )
+    return twiml_empty
 
 
 @app.post("/webhook/whoop")
