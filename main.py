@@ -1412,3 +1412,37 @@ async def debug_webhook():
         steps["conversation_state"] = f"FAIL: {e}"
     steps["all_passed"] = True
     return {"steps": steps}
+
+
+@app.get("/debug/voice")
+async def debug_voice():
+    steps = {}
+    try:
+        import imageio_ffmpeg
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+        steps["ffmpeg"] = f"OK — {ffmpeg_path}"
+    except Exception as e:
+        steps["ffmpeg"] = f"FAIL: {e}"
+        return {"steps": steps}
+
+    try:
+        result = subprocess.run(
+            [ffmpeg_path, "-version"],
+            capture_output=True, timeout=5,
+        )
+        version_line = result.stdout.decode().split("\n")[0] if result.returncode == 0 else result.stderr.decode()[:200]
+        steps["ffmpeg_version"] = f"OK — {version_line}"
+    except Exception as e:
+        steps["ffmpeg_version"] = f"FAIL: {e}"
+
+    try:
+        openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        steps["openai_client"] = "OK"
+    except Exception as e:
+        steps["openai_client"] = f"FAIL: {e}"
+
+    steps["twilio_sid"] = f"{'set' if TWILIO_ACCOUNT_SID else 'NOT SET'}"
+    steps["twilio_token"] = f"{'set' if TWILIO_AUTH_TOKEN else 'NOT SET'}"
+    steps["openai_key"] = f"{'set' if OPENAI_API_KEY else 'NOT SET'}"
+
+    return {"steps": steps}
