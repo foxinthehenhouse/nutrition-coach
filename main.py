@@ -387,11 +387,19 @@ async def transcribe_audio(media_url: str, content_type: str) -> str:
 # Food photo analysis
 # ---------------------------------------------------------------------------
 
+def _safe_json(obj) -> str:
+    """JSON serialize with fallback for non-serializable types."""
+    try:
+        return json.dumps(obj, default=str)
+    except Exception:
+        return str(obj) if obj else "none"
+
+
 async def analyze_meal_image(
     image_base64: str, content_type: str, context: dict
 ) -> dict:
     """Core Claude vision function for food detection and nutrition estimation."""
-    daily_plan_str = json.dumps(context.get("daily_plan")) if context.get("daily_plan") else "none"
+    daily_plan_str = _safe_json(context.get("daily_plan")) if context.get("daily_plan") else "none"
     context_str = f"""
 KYLE'S CONTEXT:
 - Calorie target today: {context.get('calorie_target')} kcal
@@ -579,22 +587,36 @@ If image quality is too poor or no food is visible return:
         ],
     )
 
-    raw = response.content[0].text.strip()
+    if not response.content:
+        raise ValueError("Claude returned empty response")
+    block = response.content[0]
+    raw = getattr(block, "text", None)
+    if raw is None:
+        raise ValueError(f"Claude returned unexpected block type: {type(block).__name__}")
+    raw = raw.strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
     raw = raw.replace("```", "").strip()
 
-    result = json.loads(raw)
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.error(f"Claude returned invalid JSON: {raw[:500]}")
+        raise ValueError(f"Analysis failed (invalid response). Please try again.") from e
 
     if "error" in result:
         raise ValueError(result.get("sms_confirmation", "Could not analyze image."))
 
+    totals = result.get("totals")
+    if not totals or not isinstance(totals, dict):
+        raise ValueError("Analysis incomplete. Please try again with a clearer photo.")
+
     if result.get("overall_confidence") == "medium":
-        result["totals"]["calories"] = round(result["totals"]["calories"] * 1.10)
+        result["totals"]["calories"] = round((totals.get("calories") or 0) * 1.10)
     elif result.get("overall_confidence") == "low":
-        result["totals"]["calories"] = round(result["totals"]["calories"] * 1.15)
+        result["totals"]["calories"] = round((totals.get("calories") or 0) * 1.15)
 
     return result
 
@@ -809,16 +831,33 @@ async def sync_whoop_today() -> dict:
 
 async def handle_image_entry(image_data: dict, from_number: str):
     """Called when an image is received. Builds today's context, calls Claude vision, stores pending meal, sends confirmation SMS."""
-    await sync_whoop_today()
+    if not image_data or not image_data.get("base64") or not image_data.get("content_type"):
+        raise ValueError("Invalid image data")
+
+    try:
+        await sync_whoop_today()
+    except Exception as e:
+        logger.warning(f"Whoop sync failed in handle_image_entry: {e}")
 
     today = date.today()
-    whoop = await get_whoop_cache(today)
-    food_totals = await get_food_log_totals(today)
-    daily_plan = get_today_daily_plan()
-    settings = get_settings()
+    try:
+        whoop = get_whoop_cache(today)
+        food_totals = await get_food_log_totals(today)
+        daily_plan = get_today_daily_plan()
+        settings = get_settings()
+    except Exception as e:
+        logger.error(f"Context fetch failed in handle_image_entry: {e}", exc_info=True)
+        whoop = None
+        food_totals = {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0}
+        daily_plan = None
+        settings = {}
 
     strain = whoop.get("strain_score", 0) if whoop else 0
-    calorie_target = get_calorie_target(strain, settings)
+    try:
+        calorie_target = get_calorie_target(strain, settings)
+    except Exception as e:
+        logger.warning(f"get_calorie_target failed: {e}")
+        calorie_target = 2500
 
     try:
         memory = get_mem0()
@@ -1602,6 +1641,13 @@ def verify_whoop_signature(raw_body: bytes, timestamp: str, signature: str) -> b
 # Background task processors
 # ---------------------------------------------------------------------------
 
+def _format_image_error(e: Exception) -> str:
+    """Format error for SMS - always include type for debugging."""
+    err_type = type(e).__name__
+    err_str = str(e).replace("\n", " ")[:60]
+    return f"Couldn't process that photo ({err_type}: {err_str}). Try again or describe your meal in text."
+
+
 async def process_sms_webhook(
     incoming_message: str,
     from_number: str,
@@ -1610,6 +1656,12 @@ async def process_sms_webhook(
     media_url: str = "",
 ):
     """Process inbound SMS in the background (including transcription)."""
+    def _send_error(body: str):
+        try:
+            send_sms(to=from_number, body=body[:300])
+        except Exception as sms_err:
+            logger.error(f"Failed to send error SMS: {sms_err}")
+
     try:
         source = "text"
         transcription_note = None
@@ -1631,6 +1683,10 @@ async def process_sms_webhook(
                 return
 
         elif num_media > 0 and media_content_type.startswith("image/"):
+            if not media_url or not media_url.startswith("http"):
+                logger.error("Image media URL missing or invalid")
+                _send_error("Couldn't process that photo (no media URL). Try again or describe your meal in text.")
+                return
             try:
                 logger.info(f"Downloading image from {media_url[:80]}...")
                 async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1650,14 +1706,11 @@ async def process_sms_webhook(
                 return
             except httpx.HTTPStatusError as e:
                 logger.error(f"Image download HTTP error: {e.response.status_code} {e.response.text[:200]}")
-                send_sms(to=from_number, body="Couldn't download the photo from your message. Try again or describe your meal in text.")
+                _send_error(f"Couldn't download photo (HTTP {e.response.status_code}). Try again or describe your meal.")
                 return
             except Exception as e:
                 logger.error(f"Image download/analysis failed: {type(e).__name__}: {e}", exc_info=True)
-                err_msg = "Couldn't process that photo. Try again or describe your meal in text."
-                if os.getenv("IMAGE_DEBUG"):
-                    err_msg += f" ({type(e).__name__}: {str(e)[:80]})"
-                send_sms(to=from_number, body=err_msg)
+                _send_error(_format_image_error(e))
                 return
 
         elif num_media > 0 and media_content_type:
@@ -1714,7 +1767,11 @@ async def process_sms_webhook(
             {"role": "assistant", "content": claude_response},
         ])
     except Exception as e:
-        logger.error(f"SMS processing error: {e}", exc_info=True)
+        logger.error(f"SMS processing error: {type(e).__name__}: {e}", exc_info=True)
+        try:
+            send_sms(to=from_number, body=f"Something went wrong ({type(e).__name__}). Please try again.")
+        except Exception:
+            pass
 
 
 async def process_whoop_webhook(payload: dict):
