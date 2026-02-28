@@ -118,6 +118,13 @@ def get_mem0() -> Memory:
                 "password": db_password,
             },
         },
+        "llm": {
+            "provider": "anthropic",
+            "config": {
+                "api_key": ANTHROPIC_API_KEY,
+                "model": "claude-sonnet-4-20250514",
+            },
+        },
         "embedder": {
             "provider": "openai",
             "config": {
@@ -126,6 +133,7 @@ def get_mem0() -> Memory:
             },
         },
     }
+    logger.info(f"Mem0 config: OpenAI key set={bool(OPENAI_API_KEY)}, Anthropic key set={bool(ANTHROPIC_API_KEY)}")
     return Memory.from_config(config)
 
 
