@@ -118,9 +118,37 @@ The following tables must exist in your Supabase project (they are not created b
 - **conversation_log** — SMS conversation history
 - **whoop_tokens** — OAuth2 tokens for WHOOP API
 
+For food photo analysis, run the migration in `supabase/migrations/20250228000000_food_photo_analysis.sql` to add:
+
+- **conversation_state** — tracks image confirmation flow per phone number
+- **conversation_log** — `source` and `flow` columns
+- **food_log** — `meal_type`, `fiber_g`, `sodium_mg`, `sugar_g` columns
+
 ## How It Works
 
 1. You text the bot describing what you ate
 2. The bot estimates calories and macros using Claude, referencing your WHOOP biometrics and running food totals
 3. It logs the food, updates AI memory, and replies with your remaining calories for the day
 4. Proactive check-ins and summaries keep you on track throughout the day
+
+## Food Photo Logging
+
+You can MMS a photo of your meal instead of typing. Claude vision analyzes the image and returns itemized nutrition estimates. Reply YES to log or describe corrections (e.g. "bigger portion of rice", "add a glass of milk", "no sauce on mine").
+
+### Testing Food Photo Logging
+
+1. Take a clear photo of your meal — good lighting, whole plate visible
+2. MMS it directly to your Twilio number from iPhone Messages
+3. Claude analyzes and responds with itemized estimates within 15 seconds
+4. Reply YES to log or describe any corrections naturally
+5. Corrections loop until you confirm with YES
+
+**Examples of corrections:** "bigger portion of rice", "add a glass of milk", "no sauce on mine", "that was a large not medium"
+
+**Tips for best accuracy:**
+
+- Photograph from directly above (birds-eye) for best portion estimation
+- Include a fork or familiar object in frame as a size reference
+- Good lighting significantly improves ingredient identification
+- For mixed dishes like stir fry or curry, a slight angle shot helps Claude see components
+- If Claude seems uncertain, reply with the specific item it got wrong
