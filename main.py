@@ -271,13 +271,15 @@ AUDIO_EXTENSION_MAP = {
 
 
 async def transcribe_audio(media_url: str, content_type: str) -> str:
-    async with httpx.AsyncClient() as client:
+    logger.info(f"Downloading audio: {media_url} (type={content_type})")
+    async with httpx.AsyncClient(follow_redirects=True) as client:
         response = await client.get(
             media_url,
             auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
         )
         response.raise_for_status()
         audio_bytes = response.content
+    logger.info(f"Downloaded {len(audio_bytes)} bytes of audio")
 
     extension = AUDIO_EXTENSION_MAP.get(content_type, "mp4")
 
@@ -287,6 +289,7 @@ async def transcribe_audio(media_url: str, content_type: str) -> str:
         file=(f"audio.{extension}", audio_bytes, content_type),
         prompt="This is a meal description for nutrition tracking. The speaker may mention food names, quantities, portion sizes, and meal types.",
     )
+    logger.info(f"Transcription result: {transcript.text}")
     return transcript.text
 
 
@@ -1269,8 +1272,8 @@ async def webhook_sms(request: Request, background_tasks: BackgroundTasks):
                     source = "voice"
                     logger.info(f"Voice note from {from_number} transcribed: {transcribed_text}")
                 except Exception as e:
-                    logger.error(f"Voice transcription failed: {e}")
-                    send_sms(to=from_number, body="Sorry, I couldn't transcribe that voice note. Try sending a text instead.")
+                    logger.error(f"Voice transcription failed: {type(e).__name__}: {e}", exc_info=True)
+                    send_sms(to=from_number, body=f"Transcription error: {type(e).__name__}: {str(e)[:150]}")
                     return twiml_empty
 
             elif media_content_type.startswith("image/"):
