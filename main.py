@@ -330,6 +330,67 @@ async def root():
     return RedirectResponse(url="/auth/whoop")
 
 
+@app.get("/debug/webhook")
+async def debug_webhook():
+    steps = {}
+    try:
+        settings = get_settings()
+        steps["settings"] = f"OK — {len(settings)} keys"
+    except Exception as e:
+        steps["settings"] = f"FAIL: {e}"
+        return {"steps": steps}
+
+    try:
+        food_rows, food_totals = get_today_food_log()
+        steps["food_log"] = f"OK — {len(food_rows)} rows"
+    except Exception as e:
+        steps["food_log"] = f"FAIL: {e}"
+        return {"steps": steps}
+
+    try:
+        whoop_data = get_today_whoop_cache()
+        steps["whoop_cache"] = f"OK — {'found' if whoop_data else 'empty'}"
+    except Exception as e:
+        steps["whoop_cache"] = f"FAIL: {e}"
+        return {"steps": steps}
+
+    try:
+        memory = get_mem0()
+        steps["mem0_init"] = "OK"
+    except Exception as e:
+        steps["mem0_init"] = f"FAIL: {e}"
+        return {"steps": steps}
+
+    try:
+        memories_result = memory.search(query="test", user_id="kyle")
+        steps["mem0_search"] = f"OK — {len(memories_result) if isinstance(memories_result, list) else 'non-list'} results"
+    except Exception as e:
+        steps["mem0_search"] = f"FAIL: {e}"
+        return {"steps": steps}
+
+    try:
+        system_prompt = build_system_prompt(settings, whoop_data, food_rows, food_totals, [])
+        steps["system_prompt"] = f"OK — {len(system_prompt)} chars"
+    except Exception as e:
+        steps["system_prompt"] = f"FAIL: {e}"
+        return {"steps": steps}
+
+    try:
+        response = get_claude().messages.create(
+            model="claude-opus-4-6",
+            max_tokens=64,
+            system="You are a test. Reply with 'OK'.",
+            messages=[{"role": "user", "content": "test"}],
+        )
+        steps["claude"] = f"OK — {response.content[0].text[:50]}"
+    except Exception as e:
+        steps["claude"] = f"FAIL: {e}"
+        return {"steps": steps}
+
+    steps["all_passed"] = True
+    return {"steps": steps}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
