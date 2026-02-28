@@ -1,9 +1,9 @@
 import os
 import re
 import json
+import base64
 import hmac
 import hashlib
-import base64
 import logging
 import secrets
 import asyncio
@@ -117,6 +117,8 @@ def _parse_db_url(url: str) -> dict:
     port = int(host_port[port_idx + 1:]) if port_idx != -1 else 5432
     return {"host": host, "port": port, "user": user, "password": password, "dbname": dbname}
 
+USER_ID = "kyle"
+
 
 def get_mem0() -> Memory:
     parsed = _parse_db_url(SUPABASE_DB_HOST)
@@ -179,7 +181,11 @@ def get_today_food_log() -> tuple[list[dict], dict]:
 
 
 def get_today_whoop_cache() -> dict | None:
-    today_str = date.today().isoformat()
+    return get_whoop_cache(date.today())
+
+
+def get_whoop_cache(target_date: date) -> dict | None:
+    today_str = target_date.isoformat()
     result = get_supabase().table("whoop_cache").select("*").eq("date", today_str).execute()
     return result.data[0] if result.data else None
 
@@ -202,6 +208,52 @@ def get_conversation_state() -> dict:
     default = {"id": 1, "flow": "free_chat", "step": 0, "context": {}}
     get_supabase().table("conversation_state").upsert(default).execute()
     return default
+
+
+async def get_conversation_state_by_phone(from_number: str) -> dict:
+    """Get image confirmation state for a phone number. Uses image_confirmation_state table."""
+    try:
+        result = get_supabase().table("image_confirmation_state").select("*").eq("phone", from_number).execute()
+        if result.data:
+            row = result.data[0]
+            return {"flow": row.get("flow", "free_chat"), "step": row.get("step", 0), "context": row.get("context") or {}}
+    except Exception as e:
+        logger.warning(f"get_conversation_state_by_phone failed: {e}")
+    return {"flow": "free_chat", "step": 0, "context": {}}
+
+
+async def update_conversation_state_by_phone(from_number: str, flow: str, step: int, context: dict):
+    try:
+        get_supabase().table("image_confirmation_state").upsert({
+            "phone": from_number, "flow": flow, "step": step, "context": context,
+            "updated_at": datetime.utcnow().isoformat(),
+        }, on_conflict="phone").execute()
+    except Exception as e:
+        logger.warning(f"update_conversation_state_by_phone failed: {e}")
+
+
+async def get_food_log_totals(target_date: date) -> dict:
+    """Get calorie and macro totals for a given date."""
+    today_str = target_date.isoformat()
+    result = get_supabase().table("food_log").select("calories, protein_g, carbs_g, fat_g").eq("date", today_str).execute()
+    rows = result.data or []
+    return {
+        "calories": sum(r.get("calories") or 0 for r in rows),
+        "protein_g": sum(float(r.get("protein_g") or 0) for r in rows),
+        "carbs_g": sum(float(r.get("carbs_g") or 0) for r in rows),
+        "fat_g": sum(float(r.get("fat_g") or 0) for r in rows),
+    }
+
+
+async def get_recent_food_log_descriptions(target_date: date, limit: int = 3) -> list[str]:
+    """Get recent meal descriptions for context."""
+    today_str = target_date.isoformat()
+    result = get_supabase().table("food_log").select("description").eq("date", today_str).order("time", desc=True).limit(limit).execute()
+    return [r.get("description", "") for r in (result.data or []) if r.get("description")]
+
+
+def get_calorie_target(strain_score: float | None, settings: dict) -> int:
+    return get_targets(strain_score, settings)["calories"]
 
 
 def set_conversation_state(flow: str, step: int = 0, context: dict | None = None):
@@ -238,6 +290,11 @@ def log_conversation(direction: str, message: str, flow: str | None = None, sour
     if source:
         row["source"] = source
     get_supabase().table("conversation_log").insert(row).execute()
+
+
+def log_to_conversation(inbound: str, outbound: str, source: str = "text", flow: str = "free_chat"):
+    log_conversation("inbound", inbound, flow=flow, source=source)
+    log_conversation("outbound", outbound, flow=flow, source="system")
 
 
 def send_sms(to: str, body: str):
@@ -324,6 +381,256 @@ async def transcribe_audio(media_url: str, content_type: str) -> str:
     )
     logger.info(f"Transcription result: {transcript.text}")
     return transcript.text
+
+
+# ---------------------------------------------------------------------------
+# Food photo analysis
+# ---------------------------------------------------------------------------
+
+async def analyze_meal_image(
+    image_base64: str, content_type: str, context: dict
+) -> dict:
+    """Core Claude vision function for food detection and nutrition estimation."""
+    daily_plan_str = json.dumps(context.get("daily_plan")) if context.get("daily_plan") else "none"
+    context_str = f"""
+KYLE'S CONTEXT:
+- Calorie target today: {context.get('calorie_target')} kcal
+- Eaten so far: {context.get('eaten_calories')} kcal | Protein: {context.get('eaten_protein')}g
+- Remaining: {context.get('remaining_calories')} kcal
+- Protein target: {context.get('protein_target')}g
+- Carb target: {context.get('carb_target')}g
+- Fat target: {context.get('fat_target')}g
+- Recovery score: {context.get('recovery_score', 'unknown')}%
+- Known food preferences: {context.get('food_memories', 'none yet')}
+- Recent meals today: {context.get('recent_meals', 'none logged yet')}
+- Daily plan: {daily_plan_str}
+"""
+
+    system_prompt = """You are a precision nutrition analysis system with the expertise of a
+PhD sports dietitian combined with a computer vision specialist trained on food detection datasets
+(Food-101, USDA food image libraries, MyFitnessPal meal database). Your single job is to extract
+maximally accurate nutrition data from food images.
+
+CORE PRINCIPLES:
+- Never guess blindly. If you cannot identify something with reasonable confidence, say so.
+- Portion size estimation is the highest source of error in food image analysis. Treat it
+  with the most scrutiny.
+- Account for hidden calories: cooking oils, sauces, dressings, butter, marinades. These are
+  systematically underestimated and are often the largest source of inaccuracy.
+- Distinguish between raw and cooked weights. Cooked chicken breast weighs ~25% less than raw.
+- Restaurant portions are typically 1.5–2x larger than home portions for the same dish.
+  If plating looks like a restaurant, adjust upward accordingly.
+
+VISUAL ANALYSIS PROTOCOL — execute in sequence:
+
+STEP 1 — SCENE CLASSIFICATION
+- Context: home cooked / restaurant / fast food / packaged
+- Plate or bowl size (standard dinner plate = 10-11 inches, side plate = 7-8 inches,
+  bowl = 12-16 oz capacity)
+- Meal completeness: is this the full meal or partial?
+
+STEP 2 — FOOD ITEM DETECTION
+Systematically scan the entire image:
+- Identify every distinct food item including garnishes, condiments, sides, beverages
+- Do not overlook: sauces pooled at bottom, oils glistening on surface, melted cheese,
+  croutons, toppings, drinks visible in frame
+- For mixed dishes (stir fries, salads, grain bowls, pasta, stews): decompose into
+  individual components, estimate each separately
+- Classify each item: protein / complex carb / simple carb / vegetable / fat source /
+  condiment / beverage
+
+STEP 3 — PORTION SIZE ESTIMATION
+For each item, use this hierarchy of visual anchors (most to least reliable):
+1. Known reference objects in frame: utensils (fork ~7 inches), hands, glasses,
+   condiment packets, recognizable packaging
+2. Plate or bowl dimension calibration from Step 1
+3. Food density and pile height estimation
+4. Standard serving size as prior — then adjust up or down based on visual evidence
+
+State your reasoning for any item where portion size is uncertain.
+
+Common portion benchmarks:
+- Chicken breast (cooked): palm-sized = ~120-140g = ~160-185 kcal
+- Salmon fillet: deck-of-cards size = ~150g = ~280 kcal
+- Cooked rice (in bowl): tennis ball volume = ~150g = ~195 kcal
+- Pasta (restaurant plated): typically 200-300g cooked = 280-420 kcal
+- Salad greens (full bowl): ~60-100g = negligible kcal
+- Olive oil (visible sheen on food): estimate 1-2 tbsp used in cooking
+- Avocado half: ~75g = ~120 kcal
+- Avocado quarter: ~37g = ~60 kcal
+
+STEP 4 — HIDDEN CALORIE AUDIT
+Actively identify and estimate:
+- Cooking fat: oil sheen visible? Butter? Estimate tbsp.
+- Sauces and dressings: pooled, drizzled, or absorbed? Estimate volume.
+- Cheese: coverage area (~30g per quarter-plate coverage)
+- Breading or batter on proteins: adds ~50-100 kcal per piece
+- Sugary glazes (teriyaki, BBQ, honey): add ~40-80 kcal per serving
+- Nuts or seeds as toppings: small handful (~20g) = ~120 kcal
+
+STEP 5 — MACRO AND MICRONUTRIENT CALCULATION
+- Use USDA FoodData Central as primary reference
+- For recognizable restaurant or branded items, use known chain nutritional data
+- Calculate per component: calories, protein (g), carbs (g), fiber (g), total fat (g),
+  saturated fat (g), sodium (mg), sugar (g)
+- Sum all components for meal totals
+- Apply confidence buffer: medium confidence = add 10% to calorie total;
+  low confidence = add 15% to calorie total
+
+STEP 6 — SPORTS NUTRITION ASSESSMENT
+- Protein quality: is this a complete protein source?
+- Post-workout suitability: if this looks like a post-workout meal, flag if protein
+  is under 40g or fast carbs are absent
+- Micronutrient alerts: flag if sodium >800mg, fiber <3g, or saturated fat >10g
+- Inflammatory risk: if recovery score is low (<50%), flag pro-inflammatory foods
+  (refined carbs, fried foods, processed meats)
+
+CONFIDENCE SCORING:
+- HIGH: clear image, recognizable foods, visible portion anchors, single-layer plating
+- MEDIUM: some items unclear, sauce quantities uncertain, mixed dish components estimated,
+  partial plate view
+- LOW: blurry image, heavily mixed dish with no anchors, unusual cuisine,
+  partially eaten food making original portion unclear
+
+RESPOND IN THIS EXACT JSON FORMAT — no other text, no markdown, no code blocks:
+{
+  "scene": {
+    "context": "home/restaurant/fast_food/packaged",
+    "plate_size_estimate": "10-inch dinner plate",
+    "meal_completeness": "full meal/partial/snack"
+  },
+  "components": [
+    {
+      "food": "grilled chicken breast",
+      "category": "protein",
+      "portion_estimate": "140g cooked",
+      "portion_reasoning": "palm-sized piece approximately 1 inch thick",
+      "calories": 185,
+      "protein_g": 35,
+      "carbs_g": 0,
+      "fat_g": 4,
+      "fiber_g": 0,
+      "sodium_mg": 65,
+      "sugar_g": 0,
+      "saturated_fat_g": 1,
+      "confidence": "high"
+    }
+  ],
+  "hidden_calories": [
+    {
+      "item": "olive oil cooking sheen visible on chicken",
+      "estimated_amount": "1 tbsp",
+      "calories_added": 120
+    }
+  ],
+  "totals": {
+    "calories": 650,
+    "protein_g": 45,
+    "carbs_g": 60,
+    "fat_g": 18,
+    "fiber_g": 8,
+    "sodium_mg": 420,
+    "sugar_g": 12,
+    "saturated_fat_g": 5
+  },
+  "meal_type": "breakfast/lunch/dinner/snack",
+  "overall_confidence": "high/medium/low",
+  "confidence_notes": "sauce quantity uncertain, rice portion estimated from bowl depth",
+  "uncertainty_items": ["sauce volume", "oil used in cooking"],
+  "sports_nutrition_flags": {
+    "protein_adequate": true,
+    "post_workout_suitable": true,
+    "micronutrient_alerts": ["sodium 420mg moderate"],
+    "inflammatory_risk": "low"
+  },
+  "sms_confirmation": "Grilled chicken, rice, roasted veg + olive oil — ~650 kcal, 45g protein, 60g carbs. Leaves you 980 kcal today. Sauce qty uncertain so may be ±50 kcal. Look right? Reply YES to log or correct me.",
+  "clarifying_question": null
+}
+
+If image quality is too poor or no food is visible return:
+{
+  "error": "cannot_analyze",
+  "reason": "specific reason here",
+  "sms_confirmation": "specific actionable message to user explaining the issue"
+}"""
+
+    response = get_claude().messages.create(
+        model="claude-opus-4-6",
+        max_tokens=2048,
+        system=system_prompt,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": content_type,
+                            "data": image_base64,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": f"{context_str}\n\nAnalyze this meal image following your protocol exactly. Return JSON only.",
+                    },
+                ],
+            }
+        ],
+    )
+
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    raw = raw.replace("```", "").strip()
+
+    result = json.loads(raw)
+
+    if "error" in result:
+        raise ValueError(result.get("sms_confirmation", "Could not analyze image."))
+
+    if result.get("overall_confidence") == "medium":
+        result["totals"]["calories"] = round(result["totals"]["calories"] * 1.10)
+    elif result.get("overall_confidence") == "low":
+        result["totals"]["calories"] = round(result["totals"]["calories"] * 1.15)
+
+    return result
+
+
+async def apply_meal_correction(correction: str, original_meal: dict) -> dict:
+    """User corrected something about the meal estimate. Pass back to Claude to update."""
+    response = get_claude().messages.create(
+        model="claude-opus-4-6",
+        max_tokens=1024,
+        messages=[
+            {
+                "role": "user",
+                "content": f"""You are a precision nutrition analyst.
+
+Original meal analysis:
+{json.dumps(original_meal, indent=2)}
+
+User correction: "{correction}"
+
+Update the meal analysis to reflect the correction.
+Recalculate all affected component values and totals.
+Update sms_confirmation to show the corrected values and ask for confirmation again.
+Keep sms_confirmation under 300 characters.
+
+Return the complete updated JSON in the exact same format as the original. JSON only, no other text.""",
+            }
+        ],
+    )
+
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+
+    return json.loads(raw.strip())
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +807,199 @@ async def sync_whoop_today() -> dict:
     return whoop_data
 
 
+async def handle_image_entry(image_data: dict, from_number: str):
+    """Called when an image is received. Builds today's context, calls Claude vision, stores pending meal, sends confirmation SMS."""
+    await sync_whoop_today()
+
+    today = date.today()
+    whoop = await get_whoop_cache(today)
+    food_totals = await get_food_log_totals(today)
+    daily_plan = get_today_daily_plan()
+    settings = get_settings()
+
+    strain = whoop.get("strain_score", 0) if whoop else 0
+    calorie_target = get_calorie_target(strain, settings)
+
+    memory = get_mem0()
+    food_memories = memory.search("preferred foods and typical meals", user_id=USER_ID)
+    recent_meals = await get_recent_food_log_descriptions(today, limit=3)
+
+    context = {
+        "calorie_target": calorie_target,
+        "eaten_calories": food_totals.get("calories", 0),
+        "eaten_protein": food_totals.get("protein_g", 0),
+        "remaining_calories": calorie_target - food_totals.get("calories", 0),
+        "protein_target": settings.get("protein_goal_g", 160),
+        "carb_target": settings.get("carb_goal_g", 220),
+        "fat_target": settings.get("fat_goal_g", 70),
+        "food_memories": [m["memory"] for m in food_memories] if food_memories else [],
+        "recent_meals": recent_meals,
+        "recovery_score": whoop.get("recovery_score") if whoop else None,
+        "daily_plan": daily_plan,
+    }
+
+    try:
+        analysis = await analyze_meal_image(
+            image_data["base64"],
+            image_data["content_type"],
+            context,
+        )
+    except ValueError as e:
+        send_sms(to=from_number, body=str(e))
+        return
+
+    await update_conversation_state_by_phone(
+        from_number,
+        flow="image_confirmation",
+        step=1,
+        context={"pending_meal": analysis, "from_number": from_number},
+    )
+
+    sms = analysis.get(
+        "sms_confirmation",
+        "I analyzed your meal. Does this look right? Reply YES to log or correct me.",
+    )
+    send_sms(to=from_number, body=sms)
+
+    await log_to_conversation(
+        inbound="[Image sent]",
+        outbound=sms,
+        source="image",
+        flow="image_confirmation",
+    )
+
+
+async def handle_image_confirmation(
+    from_number: str, user_message: str, state_context: dict
+) -> str:
+    """Handles the YES/correction loop after image analysis. Loops until user confirms, then logs to food_log and clears state."""
+    pending_meal = state_context.get("pending_meal")
+    if not pending_meal:
+        await update_conversation_state_by_phone(from_number, flow="free_chat", step=0, context={})
+        return "Something went wrong. Please try sending the photo again."
+
+    user_msg_lower = user_message.lower().strip()
+
+    CONFIRM_PHRASES = [
+        "yes", "yeah", "yep", "yup", "correct", "right",
+        "looks good", "log it", "that's right", "perfect", "ok", "okay", "sure",
+    ]
+
+    if any(phrase in user_msg_lower for phrase in CONFIRM_PHRASES):
+        totals = pending_meal["totals"]
+        meal_type = pending_meal.get("meal_type", "meal")
+        components = pending_meal.get("components", [])
+        description = ", ".join([c["food"] for c in components]) if components else pending_meal.get("description", "")
+
+        insert_row = {
+            "date": str(date.today()),
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "meal_type": meal_type,
+            "description": description,
+            "calories": totals["calories"],
+            "protein_g": totals["protein_g"],
+            "carbs_g": totals["carbs_g"],
+            "fat_g": totals["fat_g"],
+            "fiber_g": totals.get("fiber_g", 0),
+            "sodium_mg": totals.get("sodium_mg", 0),
+            "sugar_g": totals.get("sugar_g", 0),
+            "source": "image",
+        }
+        try:
+            get_supabase().table("food_log").insert(insert_row).execute()
+        except Exception as e:
+            logger.warning(f"food_log insert (some columns may not exist): {e}")
+            get_supabase().table("food_log").insert({
+                "date": insert_row["date"],
+                "time": insert_row["time"],
+                "description": insert_row["description"],
+                "calories": insert_row["calories"],
+                "protein_g": insert_row["protein_g"],
+                "carbs_g": insert_row["carbs_g"],
+                "fat_g": insert_row["fat_g"],
+                "source": insert_row["source"],
+            }).execute()
+
+        memory = get_mem0()
+        memory.add(
+            messages=[
+                {"role": "user", "content": f"I had {description} for {meal_type}"},
+                {"role": "assistant", "content": f"Logged {totals['calories']} kcal, {totals['protein_g']}g protein"},
+            ],
+            user_id=USER_ID,
+        )
+
+        today_totals = await get_food_log_totals(date.today())
+        settings = get_settings()
+        whoop = await get_whoop_cache(date.today())
+        strain = whoop.get("strain_score", 0) if whoop else 0
+        calorie_target = get_calorie_target(strain, settings)
+        remaining = calorie_target - today_totals.get("calories", 0)
+
+        await update_conversation_state_by_phone(from_number, flow="free_chat", step=0, context={})
+
+        flags = pending_meal.get("sports_nutrition_flags", {})
+        flag_note = ""
+        if flags.get("micronutrient_alerts"):
+            flag_note = f" Note: {flags['micronutrient_alerts'][0]}."
+
+        return f"Logged ✓ {totals['calories']} kcal | {totals['protein_g']}g protein | {totals['carbs_g']}g carbs | {totals['fat_g']}g fat. {remaining} kcal remaining today.{flag_note}"
+
+    else:
+        try:
+            corrected = await apply_meal_correction(user_message, pending_meal)
+            await update_conversation_state_by_phone(
+                from_number,
+                flow="image_confirmation",
+                step=1,
+                context={**state_context, "pending_meal": corrected},
+            )
+            return corrected.get("sms_confirmation", "Updated. Does this look right now? Reply YES to log.")
+        except Exception as e:
+            logger.error(f"apply_meal_correction failed: {e}")
+            return "Had trouble updating that. Can you rephrase? e.g. 'bigger portion of rice' or 'no sauce'"
+
+
+async def process_message(
+    incoming_message: str,
+    from_number: str,
+    input_source: str = "text",
+    transcription_note: str = None,
+    image_data: dict = None,
+):
+    state = await get_conversation_state_by_phone(from_number)
+    flow = state.get("flow", "free_chat")
+    step = state.get("step", 0)
+    context = state.get("context", {})
+
+    if incoming_message == "__IMAGE_MEAL__" and image_data:
+        await handle_image_entry(image_data, from_number)
+        return
+
+    if flow == "image_confirmation":
+        response_text = await handle_image_confirmation(from_number, incoming_message, context)
+        send_sms(to=from_number, body=response_text)
+        await log_to_conversation(
+            incoming_message, response_text,
+            source=input_source,
+            flow="image_confirmation",
+        )
+        return
+
+    claude_input = incoming_message
+    if transcription_note and input_source == "voice":
+        claude_input = (
+            "[This message was transcribed from a voice note. The user spoke naturally "
+            "so interpret it generously — meal descriptions should be parsed as full meal entries.] "
+            + incoming_message
+        )
+    await sync_whoop_today()
+    claude_response = build_context_and_call(claude_input)
+    process_and_send(claude_response, from_number, flow="free_chat")
+    log_to_conversation(incoming_message, claude_response, source=input_source, flow="free_chat")
+    mem0_add([{"role": "user", "content": incoming_message}, {"role": "assistant", "content": claude_response}])
+
+
 async def fetch_workout_by_id(workout_id: str) -> dict | None:
     token = await get_whoop_token()
     if not token:
@@ -662,7 +1162,6 @@ def mem0_add(messages: list):
         memory.add(messages=messages, user_id=USER_ID)
     except Exception as e:
         logger.error(f"Mem0 add failed: {e}")
-
 
 # ---------------------------------------------------------------------------
 # Claude call helper
@@ -1118,7 +1617,22 @@ async def process_sms_webhook(
                 return
 
         elif num_media > 0 and media_content_type.startswith("image/"):
-            incoming_message = "The user sent a photo — ask them to describe the meal in text or voice for now."
+            try:
+                async with httpx.AsyncClient() as client:
+                    img_response = await client.get(
+                        media_url,
+                        auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+                    )
+                    img_response.raise_for_status()
+                    image_bytes = img_response.content
+                    image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+                image_data = {"base64": image_base64, "content_type": media_content_type}
+                await process_message("__IMAGE_MEAL__", from_number, input_source="image", image_data=image_data)
+                return
+            except Exception as e:
+                logger.error(f"Image download/analysis failed: {e}", exc_info=True)
+                send_sms(to=from_number, body="Couldn't process that photo. Try again or describe your meal in text.")
+                return
 
         elif num_media > 0 and media_content_type:
             try:

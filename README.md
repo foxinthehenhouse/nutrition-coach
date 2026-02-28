@@ -175,3 +175,27 @@ The bot supports voice notes sent as audio MMS. When a voice note is received, i
 5. You should receive a transcription confirmation and calorie estimate within 15-20 seconds
 
 **Note:** Standard iMessage audio messages may not send as MMS to a Twilio number depending on carrier. If voice notes aren't being received, use WhatsApp connected to the same Twilio number, or use Wispr Flow to transcribe on-device before sending as text.
+
+## Food Photo Logging
+
+You can MMS a photo of your meal instead of typing. Claude vision analyzes the image and returns itemized nutrition estimates. Reply YES to log or describe corrections (e.g. "bigger portion of rice", "add a glass of milk", "no sauce on mine").
+
+### Testing Food Photo Logging
+
+1. Take a clear photo of your meal — good lighting, whole plate visible
+2. MMS it directly to your Twilio number from iPhone Messages
+3. Claude analyzes and responds with itemized estimates within 15 seconds
+4. Reply YES to log or describe any corrections naturally
+5. Corrections loop until you confirm with YES
+
+**Examples of corrections:** "bigger portion of rice", "add a glass of milk", "no sauce on mine", "that was a large not medium"
+
+**Tips for best accuracy:**
+
+- Photograph from directly above (birds-eye) for best portion estimation
+- Include a fork or familiar object in frame as a size reference
+- Good lighting significantly improves ingredient identification
+- For mixed dishes like stir fry or curry, a slight angle shot helps Claude see components
+- If Claude seems uncertain, reply with the specific item it got wrong
+
+For food photo analysis, the `conversation_state` table supports per-phone image confirmation flow. Run `supabase/migrations/20250228000000_food_photo_analysis.sql` if adding to an existing schema.
