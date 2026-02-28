@@ -15,6 +15,7 @@ from urllib.parse import urlencode
 import httpx
 import openai
 import anthropic
+import certifi
 import imageio_ffmpeg
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response, BackgroundTasks
@@ -275,7 +276,8 @@ AUDIO_EXTENSION_MAP = {
 
 async def transcribe_audio(media_url: str, content_type: str) -> str:
     logger.info(f"Downloading audio: {media_url} (type={content_type})")
-    async with httpx.AsyncClient(follow_redirects=True) as client:
+    ssl_context = certifi.where()
+    async with httpx.AsyncClient(follow_redirects=True, verify=ssl_context) as client:
         response = await client.get(
             media_url,
             auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
