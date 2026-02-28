@@ -1600,6 +1600,7 @@ async def process_sms_webhook(
 
         if num_media > 0 and media_content_type.startswith("audio/"):
             try:
+                logger.info(f"Starting voice transcription for {from_number}: url={media_url} type={media_content_type}")
                 transcribed_text = await transcribe_audio(media_url, media_content_type)
                 transcription_note = f"[Voice note transcribed: '{transcribed_text}']"
                 incoming_message = transcribed_text
@@ -1607,7 +1608,10 @@ async def process_sms_webhook(
                 logger.info(f"Voice note from {from_number} transcribed: {transcribed_text}")
             except Exception as e:
                 logger.error(f"Voice transcription failed: {type(e).__name__}: {e}", exc_info=True)
-                send_sms(to=from_number, body=f"Couldn't transcribe voice note: {str(e)[:120]}. Try text instead.")
+                try:
+                    send_sms(to=from_number, body=f"Couldn't transcribe voice note: {str(e)[:120]}. Try text instead.")
+                except Exception as sms_err:
+                    logger.error(f"Failed to send transcription error SMS: {sms_err}")
                 return
 
         elif num_media > 0 and media_content_type.startswith("image/"):
@@ -1628,15 +1632,22 @@ async def process_sms_webhook(
                 send_sms(to=from_number, body="Couldn't process that photo. Try again or describe your meal in text.")
                 return
 
-        elif num_media > 0 and not media_content_type.startswith("audio/") and not media_content_type.startswith("image/"):
-            send_sms(to=from_number, body="I can only process voice notes and text right now. Describe your meal by voice or text.")
+        elif num_media > 0 and media_content_type:
+            try:
+                send_sms(to=from_number, body="I can only process voice notes and text right now. Describe your meal by voice or text.")
+            except Exception as e:
+                logger.error(f"Failed to send unsupported media SMS: {e}")
             return
 
         if not incoming_message:
+            logger.warning(f"No message content from {from_number}, skipping")
             return
 
         log_msg = f"[Voice]: {incoming_message}" if source == "voice" else incoming_message
-        log_conversation("inbound", log_msg, flow=None, source=source)
+        try:
+            log_conversation("inbound", log_msg, flow=None, source=source)
+        except Exception as e:
+            logger.error(f"Failed to log inbound: {e}")
 
         claude_input = incoming_message
         if transcription_note:
@@ -1657,10 +1668,18 @@ async def process_sms_webhook(
             mem0_add([{"role": "user", "content": incoming_message}])
             return
 
-        await sync_whoop_today()
+        try:
+            await sync_whoop_today()
+        except Exception as e:
+            logger.error(f"Whoop sync failed (continuing): {e}")
+
         claude_response = build_context_and_call(claude_input)
         clean_message = process_and_send(claude_response, from_number, flow="free_chat")
-        log_conversation("inbound", log_msg, flow="free_chat", source=source)
+
+        try:
+            log_conversation("inbound", log_msg, flow="free_chat", source=source)
+        except Exception as e:
+            logger.error(f"Failed to log conversation: {e}")
 
         mem0_add([
             {"role": "user", "content": incoming_message},
@@ -1925,4 +1944,38 @@ async def debug_webhook():
     except Exception as e:
         steps["conversation_state"] = f"FAIL: {e}"
     steps["all_passed"] = True
+    return {"steps": steps}
+
+
+@app.get("/debug/voice")
+async def debug_voice():
+    steps = {}
+    try:
+        import imageio_ffmpeg
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+        steps["ffmpeg"] = f"OK — {ffmpeg_path}"
+    except Exception as e:
+        steps["ffmpeg"] = f"FAIL: {e}"
+        return {"steps": steps}
+
+    try:
+        result = subprocess.run(
+            [ffmpeg_path, "-version"],
+            capture_output=True, timeout=5,
+        )
+        version_line = result.stdout.decode().split("\n")[0] if result.returncode == 0 else result.stderr.decode()[:200]
+        steps["ffmpeg_version"] = f"OK — {version_line}"
+    except Exception as e:
+        steps["ffmpeg_version"] = f"FAIL: {e}"
+
+    try:
+        openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        steps["openai_client"] = "OK"
+    except Exception as e:
+        steps["openai_client"] = f"FAIL: {e}"
+
+    steps["twilio_sid"] = f"{'set' if TWILIO_ACCOUNT_SID else 'NOT SET'}"
+    steps["twilio_token"] = f"{'set' if TWILIO_AUTH_TOKEN else 'NOT SET'}"
+    steps["openai_key"] = f"{'set' if OPENAI_API_KEY else 'NOT SET'}"
+
     return {"steps": steps}
