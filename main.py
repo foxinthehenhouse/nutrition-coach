@@ -914,7 +914,7 @@ async def handle_image_entry(image_data: dict, from_number: str):
     )
     send_sms(to=from_number, body=sms)
 
-    await log_to_conversation(
+    log_to_conversation(
         inbound="[Image sent]",
         outbound=sms,
         source="image",
@@ -1032,7 +1032,7 @@ async def process_message(
     if flow == "image_confirmation":
         response_text = await handle_image_confirmation(from_number, incoming_message, context)
         send_sms(to=from_number, body=response_text)
-        await log_to_conversation(
+        log_to_conversation(
             incoming_message, response_text,
             source=input_source,
             flow="image_confirmation",
@@ -1723,6 +1723,15 @@ async def process_sms_webhook(
         if not incoming_message:
             logger.warning(f"No message content from {from_number}, skipping")
             return
+
+        # Check if user is in image confirmation flow (reply to photo analysis)
+        try:
+            phone_state = await get_conversation_state_by_phone(from_number)
+            if phone_state.get("flow") == "image_confirmation":
+                await process_message(incoming_message, from_number, input_source=source)
+                return
+        except Exception as e:
+            logger.error(f"Image confirmation check failed: {e}", exc_info=True)
 
         log_msg = f"[Voice]: {incoming_message}" if source == "voice" else incoming_message
         try:
