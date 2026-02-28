@@ -3,6 +3,7 @@ import re
 import json
 import hmac
 import hashlib
+import base64
 import logging
 import secrets
 import asyncio
@@ -46,7 +47,6 @@ TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 WHOOP_CLIENT_ID = os.getenv("WHOOP_CLIENT_ID")
 WHOOP_CLIENT_SECRET = os.getenv("WHOOP_CLIENT_SECRET")
 WHOOP_REDIRECT_URI = os.getenv("WHOOP_REDIRECT_URI")
-WHOOP_WEBHOOK_SECRET = os.getenv("WHOOP_WEBHOOK_SECRET")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SECRET_KEY")
 SUPABASE_DB_HOST = os.getenv("SUPABASE_DB_HOST")
@@ -1004,11 +1004,14 @@ async def handle_night_summary() -> str:
 # WHOOP webhook verification
 # ---------------------------------------------------------------------------
 
-def verify_whoop_signature(body: bytes, signature: str) -> bool:
-    if not WHOOP_WEBHOOK_SECRET:
-        logger.warning("WHOOP_WEBHOOK_SECRET not set, skipping verification")
+def verify_whoop_signature(raw_body: bytes, timestamp: str, signature: str) -> bool:
+    if not WHOOP_CLIENT_SECRET:
+        logger.warning("WHOOP_CLIENT_SECRET not set, skipping webhook verification")
         return True
-    expected = hmac.new(WHOOP_WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    message = timestamp.encode() + raw_body
+    expected = base64.b64encode(
+        hmac.new(WHOOP_CLIENT_SECRET.encode(), message, hashlib.sha256).digest()
+    ).decode()
     return hmac.compare_digest(expected, signature)
 
 
@@ -1214,9 +1217,10 @@ async def webhook_sms(request: Request, background_tasks: BackgroundTasks):
 @app.post("/webhook/whoop")
 async def webhook_whoop(request: Request, background_tasks: BackgroundTasks):
     body = await request.body()
-    signature = request.headers.get("x-whoop-signature", "")
+    signature = request.headers.get("X-WHOOP-Signature", "")
+    timestamp = request.headers.get("X-WHOOP-Signature-Timestamp", "")
 
-    if WHOOP_WEBHOOK_SECRET and not verify_whoop_signature(body, signature):
+    if not verify_whoop_signature(body, timestamp, signature):
         logger.warning("WHOOP webhook signature verification failed")
         return JSONResponse(status_code=401, content={"error": "Invalid signature"})
 
@@ -1256,7 +1260,7 @@ async def debug_webhook():
         "ANTHROPIC_API_KEY": f"{'set' if ANTHROPIC_API_KEY else 'NOT SET'}",
         "SUPABASE_DB_HOST": f"{'set' if SUPABASE_DB_HOST else 'NOT SET'}",
         "SUPABASE_KEY": f"{'set' if SUPABASE_KEY else 'NOT SET'}",
-        "WHOOP_WEBHOOK_SECRET": f"{'set' if WHOOP_WEBHOOK_SECRET else 'NOT SET'}",
+        "WHOOP_CLIENT_SECRET": f"{'set' if WHOOP_CLIENT_SECRET else 'NOT SET'}",
     }
     try:
         settings = get_settings()

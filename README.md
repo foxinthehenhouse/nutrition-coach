@@ -96,7 +96,6 @@ In the Railway dashboard, go to your service's **Variables** tab and add all key
 - `WHOOP_CLIENT_ID` — WHOOP developer app client ID
 - `WHOOP_CLIENT_SECRET` — WHOOP developer app client secret
 - `WHOOP_REDIRECT_URI` — OAuth callback URL (e.g. https://your-app.up.railway.app/auth/whoop/callback)
-- `WHOOP_WEBHOOK_SECRET` — Secret for verifying WHOOP webhook signatures
 - `SUPABASE_URL` — Supabase project URL
 - `SUPABASE_KEY` — Supabase service role key
 - `SUPABASE_DB_HOST` — PostgreSQL connection string
