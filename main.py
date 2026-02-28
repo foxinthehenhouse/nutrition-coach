@@ -76,13 +76,35 @@ def get_claude() -> anthropic.Anthropic:
     return _claude_client
 
 
+def _parse_db_url(url: str) -> dict:
+    """Parse a PostgreSQL connection string, handling special chars in passwords."""
+    if not url or not url.startswith("postgresql://"):
+        return {}
+    stripped = url[len("postgresql://"):]
+    at_idx = stripped.rfind("@")
+    if at_idx == -1:
+        return {}
+    userinfo = stripped[:at_idx]
+    hostinfo = stripped[at_idx + 1:]
+    colon_idx = userinfo.find(":")
+    user = userinfo[:colon_idx] if colon_idx != -1 else userinfo
+    password = userinfo[colon_idx + 1:] if colon_idx != -1 else ""
+    slash_idx = hostinfo.find("/")
+    host_port = hostinfo[:slash_idx] if slash_idx != -1 else hostinfo
+    dbname = hostinfo[slash_idx + 1:] if slash_idx != -1 else "postgres"
+    port_idx = host_port.rfind(":")
+    host = host_port[:port_idx] if port_idx != -1 else host_port
+    port = int(host_port[port_idx + 1:]) if port_idx != -1 else 5432
+    return {"host": host, "port": port, "user": user, "password": password, "dbname": dbname}
+
+
 def get_mem0() -> Memory:
-    parsed = urlparse(SUPABASE_DB_HOST)
-    db_host = parsed.hostname or SUPABASE_DB_HOST
-    db_port = parsed.port or 5432
-    db_user = parsed.username or "postgres"
-    db_password = parsed.password or SUPABASE_DB_PASSWORD
-    db_name = parsed.path.lstrip("/") or "postgres"
+    parsed = _parse_db_url(SUPABASE_DB_HOST)
+    db_host = parsed.get("host", "localhost")
+    db_port = parsed.get("port", 5432)
+    db_user = parsed.get("user", "postgres")
+    db_password = parsed.get("password") or SUPABASE_DB_PASSWORD
+    db_name = parsed.get("dbname", "postgres")
 
     config = {
         "vector_store": {
