@@ -44,6 +44,7 @@ SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
 SUPABASE_DB_HOST = os.getenv("SUPABASE_DB_HOST")
 SUPABASE_DB_PASSWORD = os.getenv("SUPABASE_DB_PASSWORD")
 OWNER_PHONE_NUMBER = os.getenv("OWNER_PHONE_NUMBER")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 WHOOP_BASE_URL = "https://api.prod.whoop.com/developer"
 WHOOP_AUTH_URL = "https://api.prod.whoop.com/oauth/oauth2/auth"
@@ -115,6 +116,13 @@ def get_mem0() -> Memory:
                 "dbname": db_name,
                 "user": db_user,
                 "password": db_password,
+            },
+        },
+        "embedder": {
+            "provider": "openai",
+            "config": {
+                "api_key": OPENAI_API_KEY,
+                "model": "text-embedding-3-small",
             },
         },
     }
