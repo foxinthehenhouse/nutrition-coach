@@ -1101,6 +1101,7 @@ async def process_sms_webhook(
 
         if num_media > 0 and media_content_type.startswith("audio/"):
             try:
+                logger.info(f"Starting voice transcription for {from_number}: url={media_url} type={media_content_type}")
                 transcribed_text = await transcribe_audio(media_url, media_content_type)
                 transcription_note = f"[Voice note transcribed: '{transcribed_text}']"
                 incoming_message = transcribed_text
@@ -1108,21 +1109,31 @@ async def process_sms_webhook(
                 logger.info(f"Voice note from {from_number} transcribed: {transcribed_text}")
             except Exception as e:
                 logger.error(f"Voice transcription failed: {type(e).__name__}: {e}", exc_info=True)
-                send_sms(to=from_number, body=f"Couldn't transcribe voice note: {str(e)[:120]}. Try text instead.")
+                try:
+                    send_sms(to=from_number, body=f"Couldn't transcribe voice note: {str(e)[:120]}. Try text instead.")
+                except Exception as sms_err:
+                    logger.error(f"Failed to send transcription error SMS: {sms_err}")
                 return
 
         elif num_media > 0 and media_content_type.startswith("image/"):
             incoming_message = "The user sent a photo — ask them to describe the meal in text or voice for now."
 
-        elif num_media > 0 and not media_content_type.startswith("audio/") and not media_content_type.startswith("image/"):
-            send_sms(to=from_number, body="I can only process voice notes and text right now. Describe your meal by voice or text.")
+        elif num_media > 0 and media_content_type:
+            try:
+                send_sms(to=from_number, body="I can only process voice notes and text right now. Describe your meal by voice or text.")
+            except Exception as e:
+                logger.error(f"Failed to send unsupported media SMS: {e}")
             return
 
         if not incoming_message:
+            logger.warning(f"No message content from {from_number}, skipping")
             return
 
         log_msg = f"[Voice]: {incoming_message}" if source == "voice" else incoming_message
-        log_conversation("inbound", log_msg, flow=None, source=source)
+        try:
+            log_conversation("inbound", log_msg, flow=None, source=source)
+        except Exception as e:
+            logger.error(f"Failed to log inbound: {e}")
 
         claude_input = incoming_message
         if transcription_note:
@@ -1143,10 +1154,18 @@ async def process_sms_webhook(
             mem0_add([{"role": "user", "content": incoming_message}])
             return
 
-        await sync_whoop_today()
+        try:
+            await sync_whoop_today()
+        except Exception as e:
+            logger.error(f"Whoop sync failed (continuing): {e}")
+
         claude_response = build_context_and_call(claude_input)
         clean_message = process_and_send(claude_response, from_number, flow="free_chat")
-        log_conversation("inbound", log_msg, flow="free_chat", source=source)
+
+        try:
+            log_conversation("inbound", log_msg, flow="free_chat", source=source)
+        except Exception as e:
+            logger.error(f"Failed to log conversation: {e}")
 
         mem0_add([
             {"role": "user", "content": incoming_message},
