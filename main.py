@@ -371,6 +371,11 @@ async def root():
 @app.get("/debug/webhook")
 async def debug_webhook():
     steps = {}
+    steps["env_check"] = {
+        "OPENAI_API_KEY": f"{'set (' + OPENAI_API_KEY[:8] + '...)' if OPENAI_API_KEY else 'NOT SET'}",
+        "ANTHROPIC_API_KEY": f"{'set' if ANTHROPIC_API_KEY else 'NOT SET'}",
+        "SUPABASE_DB_HOST": f"{'set' if SUPABASE_DB_HOST else 'NOT SET'}",
+    }
     try:
         settings = get_settings()
         steps["settings"] = f"OK — {len(settings)} keys"
