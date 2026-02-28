@@ -1,10 +1,11 @@
--- Food photo analysis: conversation state, log metadata, and food_log enhancements
+-- Food photo analysis: per-phone image confirmation state (separate from main conversation_state)
 
--- conversation_state: tracks flow (free_chat, image_confirmation) per phone number
-create table if not exists conversation_state (
+-- image_confirmation_state: tracks image confirmation flow per phone number
+-- (main conversation_state uses id=1 for morning planning etc.; this table is for MMS image flow)
+create table if not exists image_confirmation_state (
   phone text primary key,
-  flow text not null default 'free_chat',
-  step int not null default 0,
+  flow text not null default 'image_confirmation',
+  step int not null default 1,
   context jsonb default '{}',
   updated_at timestamptz default now()
 );

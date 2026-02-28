@@ -210,9 +210,9 @@ def get_conversation_state() -> dict:
 
 
 async def get_conversation_state_by_phone(from_number: str) -> dict:
-    """Get conversation state for a phone number (image_confirmation flow). Default: free_chat."""
+    """Get image confirmation state for a phone number. Uses image_confirmation_state table."""
     try:
-        result = get_supabase().table("conversation_state").select("*").eq("phone", from_number).execute()
+        result = get_supabase().table("image_confirmation_state").select("*").eq("phone", from_number).execute()
         if result.data:
             row = result.data[0]
             return {"flow": row.get("flow", "free_chat"), "step": row.get("step", 0), "context": row.get("context") or {}}
@@ -223,7 +223,7 @@ async def get_conversation_state_by_phone(from_number: str) -> dict:
 
 async def update_conversation_state_by_phone(from_number: str, flow: str, step: int, context: dict):
     try:
-        get_supabase().table("conversation_state").upsert({
+        get_supabase().table("image_confirmation_state").upsert({
             "phone": from_number, "flow": flow, "step": step, "context": context,
             "updated_at": datetime.utcnow().isoformat(),
         }, on_conflict="phone").execute()
