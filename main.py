@@ -1689,7 +1689,7 @@ async def process_sms_webhook(
                 return
             try:
                 logger.info(f"Downloading image from {media_url[:80]}...")
-                async with httpx.AsyncClient(timeout=30.0) as client:
+                async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
                     img_response = await client.get(
                         media_url,
                         auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
