@@ -1090,11 +1090,37 @@ def verify_whoop_signature(raw_body: bytes, timestamp: str, signature: str) -> b
 async def process_sms_webhook(
     incoming_message: str,
     from_number: str,
-    transcription_note: str | None = None,
-    source: str = "text",
+    num_media: int = 0,
+    media_content_type: str = "",
+    media_url: str = "",
 ):
-    """Process inbound SMS in the background."""
+    """Process inbound SMS in the background (including transcription)."""
     try:
+        source = "text"
+        transcription_note = None
+
+        if num_media > 0 and media_content_type.startswith("audio/"):
+            try:
+                transcribed_text = await transcribe_audio(media_url, media_content_type)
+                transcription_note = f"[Voice note transcribed: '{transcribed_text}']"
+                incoming_message = transcribed_text
+                source = "voice"
+                logger.info(f"Voice note from {from_number} transcribed: {transcribed_text}")
+            except Exception as e:
+                logger.error(f"Voice transcription failed: {type(e).__name__}: {e}", exc_info=True)
+                send_sms(to=from_number, body=f"Couldn't transcribe voice note: {str(e)[:120]}. Try text instead.")
+                return
+
+        elif num_media > 0 and media_content_type.startswith("image/"):
+            incoming_message = "The user sent a photo — ask them to describe the meal in text or voice for now."
+
+        elif num_media > 0 and not media_content_type.startswith("audio/") and not media_content_type.startswith("image/"):
+            send_sms(to=from_number, body="I can only process voice notes and text right now. Describe your meal by voice or text.")
+            return
+
+        if not incoming_message:
+            return
+
         log_msg = f"[Voice]: {incoming_message}" if source == "voice" else incoming_message
         log_conversation("inbound", log_msg, flow=None, source=source)
 
@@ -1287,39 +1313,14 @@ async def webhook_sms(request: Request, background_tasks: BackgroundTasks):
         incoming_message = form.get("Body", "").strip()
         from_number = form.get("From", "")
         num_media = int(form.get("NumMedia", "0"))
+        media_content_type = form.get("MediaContentType0", "") if num_media > 0 else ""
+        media_url = form.get("MediaUrl0", "") if num_media > 0 else ""
 
-        transcription_note = None
-        source = "text"
-
-        if num_media > 0:
-            media_content_type = form.get("MediaContentType0", "")
-            media_url = form.get("MediaUrl0", "")
-
-            if media_content_type.startswith("audio/"):
-                try:
-                    transcribed_text = await transcribe_audio(media_url, media_content_type)
-                    transcription_note = f"[Voice note transcribed: '{transcribed_text}']"
-                    incoming_message = transcribed_text
-                    source = "voice"
-                    logger.info(f"Voice note from {from_number} transcribed: {transcribed_text}")
-                except Exception as e:
-                    logger.error(f"Voice transcription failed: {type(e).__name__}: {e}", exc_info=True)
-                    send_sms(to=from_number, body=f"Transcription error: {type(e).__name__}: {str(e)[:150]}")
-                    return twiml_empty
-
-            elif media_content_type.startswith("image/"):
-                incoming_message = "The user sent a photo — ask them to describe the meal in text or voice for now."
-                source = "text"
-
-            else:
-                send_sms(to=from_number, body="I can only process voice notes and text right now. Describe your meal by voice or text.")
-                return twiml_empty
-
-        if not incoming_message:
-            return twiml_empty
-
-        logger.info(f"SMS from {from_number} (source={source}): {incoming_message}")
-        background_tasks.add_task(process_sms_webhook, incoming_message, from_number, transcription_note, source)
+        logger.info(f"SMS from {from_number}: text='{incoming_message}' media={num_media} type={media_content_type}")
+        background_tasks.add_task(
+            process_sms_webhook, incoming_message, from_number,
+            num_media, media_content_type, media_url,
+        )
     except Exception as e:
         logger.error(f"Webhook parse error: {e}", exc_info=True)
 
