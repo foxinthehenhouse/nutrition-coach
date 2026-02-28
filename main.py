@@ -7,6 +7,8 @@ import base64
 import logging
 import secrets
 import asyncio
+import subprocess
+import tempfile
 from datetime import datetime, timezone, date, time as dt_time, timedelta
 from urllib.parse import urlencode
 
@@ -279,14 +281,42 @@ async def transcribe_audio(media_url: str, content_type: str) -> str:
         )
         response.raise_for_status()
         audio_bytes = response.content
-    logger.info(f"Downloaded {len(audio_bytes)} bytes of audio")
+        actual_type = response.headers.get("content-type", content_type).split(";")[0].strip()
+    logger.info(f"Downloaded {len(audio_bytes)} bytes (actual type={actual_type})")
 
-    extension = AUDIO_EXTENSION_MAP.get(content_type, "mp4")
+    input_ext = AUDIO_EXTENSION_MAP.get(actual_type, AUDIO_EXTENSION_MAP.get(content_type, "dat"))
+    input_path = None
+    output_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=f".{input_ext}", delete=False) as f:
+            f.write(audio_bytes)
+            input_path = f.name
+        output_path = input_path.rsplit(".", 1)[0] + ".mp3"
+
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", input_path, "-f", "mp3", "-ac", "1", "-ar", "16000", output_path],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode != 0:
+            logger.warning(f"ffmpeg conversion failed: {result.stderr.decode()[-300:]}")
+            mp3_bytes = audio_bytes
+            filename = f"audio.{input_ext}"
+        else:
+            with open(output_path, "rb") as f:
+                mp3_bytes = f.read()
+            filename = "audio.mp3"
+            logger.info(f"Converted to MP3: {len(mp3_bytes)} bytes")
+    finally:
+        if input_path and os.path.exists(input_path):
+            os.unlink(input_path)
+        if output_path and os.path.exists(output_path):
+            os.unlink(output_path)
 
     openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
     transcript = openai_client.audio.transcriptions.create(
         model="whisper-1",
-        file=(f"audio.{extension}", audio_bytes, content_type),
+        file=(filename, mp3_bytes, "audio/mpeg"),
         prompt="This is a meal description for nutrition tracking. The speaker may mention food names, quantities, portion sizes, and meal types.",
     )
     logger.info(f"Transcription result: {transcript.text}")
