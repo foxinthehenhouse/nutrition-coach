@@ -1023,7 +1023,8 @@ async def handle_image_confirmation(
             return corrected.get("sms_confirmation", "Updated. Does this look right now? Reply YES to log.")
         except Exception as e:
             logger.error(f"apply_meal_correction failed: {e}", exc_info=True)
-            return "Had trouble updating that. Can you rephrase? (e.g. 'bigger portion of rice') Or reply CANCEL to start over."
+            await update_conversation_state_by_phone(from_number, flow="free_chat", step=0, context={})
+            return "Had trouble with that correction — I've cleared it. Describe your meal in text, send a new photo, or use voice to log."
 
 
 async def process_message(
