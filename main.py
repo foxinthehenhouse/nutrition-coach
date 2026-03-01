@@ -734,6 +734,14 @@ async def refresh_whoop_token(refresh_token: str) -> str | None:
 # WHOOP sync
 # ---------------------------------------------------------------------------
 
+async def _sync_whoop_background():
+    """Run WHOOP sync in background; don't block the response."""
+    try:
+        await sync_whoop_today()
+    except Exception as e:
+        logger.warning(f"Background Whoop sync failed: {e}")
+
+
 async def sync_whoop_today() -> dict:
     token = await get_whoop_token()
     if not token:
@@ -834,10 +842,7 @@ async def handle_image_entry(image_data: dict, from_number: str):
     if not image_data or not image_data.get("base64") or not image_data.get("content_type"):
         raise ValueError("Invalid image data")
 
-    try:
-        await sync_whoop_today()
-    except Exception as e:
-        logger.warning(f"Whoop sync failed in handle_image_entry: {e}")
+    asyncio.create_task(_sync_whoop_background())
 
     today = date.today()
     try:
@@ -933,6 +938,14 @@ async def handle_image_confirmation(
 
     user_msg_lower = user_message.lower().strip()
 
+    CANCEL_PHRASES = [
+        "cancel", "nevermind", "never mind", "skip", "new meal", "start over",
+        "forget it", "no", "nope", "clear", "restart",
+    ]
+    if any(phrase in user_msg_lower for phrase in CANCEL_PHRASES):
+        await update_conversation_state_by_phone(from_number, flow="free_chat", step=0, context={})
+        return "Cleared. What would you like to log? (Describe your meal, send a photo, or use voice.)"
+
     CONFIRM_PHRASES = [
         "yes", "yeah", "yep", "yup", "correct", "right",
         "looks good", "log it", "that's right", "perfect", "ok", "okay", "sure",
@@ -984,7 +997,7 @@ async def handle_image_confirmation(
 
         today_totals = await get_food_log_totals(date.today())
         settings = get_settings()
-        whoop = await get_whoop_cache(date.today())
+        whoop = get_whoop_cache(date.today())
         strain = whoop.get("strain_score", 0) if whoop else 0
         calorie_target = get_calorie_target(strain, settings)
         remaining = calorie_target - today_totals.get("calories", 0)
@@ -1009,8 +1022,8 @@ async def handle_image_confirmation(
             )
             return corrected.get("sms_confirmation", "Updated. Does this look right now? Reply YES to log.")
         except Exception as e:
-            logger.error(f"apply_meal_correction failed: {e}")
-            return "Had trouble updating that. Can you rephrase? e.g. 'bigger portion of rice' or 'no sauce'"
+            logger.error(f"apply_meal_correction failed: {e}", exc_info=True)
+            return "Had trouble updating that. Can you rephrase? (e.g. 'bigger portion of rice') Or reply CANCEL to start over."
 
 
 async def process_message(
@@ -1046,7 +1059,7 @@ async def process_message(
             "so interpret it generously — meal descriptions should be parsed as full meal entries.] "
             + incoming_message
         )
-    await sync_whoop_today()
+    asyncio.create_task(_sync_whoop_background())
     claude_response = build_context_and_call(claude_input)
     process_and_send(claude_response, from_number, flow="free_chat")
     log_to_conversation(incoming_message, claude_response, source=input_source, flow="free_chat")
@@ -1364,7 +1377,7 @@ def analyze_patterns(period: str = "weekly") -> dict:
 
 async def handle_morning_planning(step: int, context: dict, user_message: str = "") -> None:
     if step == 0:
-        await sync_whoop_today()
+        asyncio.create_task(_sync_whoop_background())
         memories = mem0_search("training schedule preferences typical morning routine")
         settings = get_settings()
         whoop_data = get_today_whoop_cache()
@@ -1496,7 +1509,7 @@ async def handle_morning_planning(step: int, context: dict, user_message: str = 
 
 
 async def handle_midday_checkin() -> str:
-    await sync_whoop_today()
+    asyncio.create_task(_sync_whoop_background())
     memories = mem0_search("lunch preferences")
     settings = get_settings()
     food_rows, food_totals = get_today_food_log()
@@ -1522,7 +1535,7 @@ async def handle_midday_checkin() -> str:
 
 
 async def handle_evening_checkin() -> str:
-    await sync_whoop_today()
+    asyncio.create_task(_sync_whoop_background())
     memories = mem0_search("dinner preferences evening eating patterns")
     settings = get_settings()
     food_rows, food_totals = get_today_food_log()
@@ -1575,7 +1588,7 @@ async def handle_post_workout(workout_data: dict | None = None) -> str:
 
 
 async def handle_night_summary() -> str:
-    await sync_whoop_today()
+    asyncio.create_task(_sync_whoop_background())
     memories = mem0_search("weekly_pattern monthly_pattern")
     settings = get_settings()
     food_rows, food_totals = get_today_food_log()
@@ -1758,10 +1771,7 @@ async def process_sms_webhook(
             mem0_add([{"role": "user", "content": incoming_message}])
             return
 
-        try:
-            await sync_whoop_today()
-        except Exception as e:
-            logger.error(f"Whoop sync failed (continuing): {e}")
+        asyncio.create_task(_sync_whoop_background())
 
         claude_response = build_context_and_call(claude_input)
         clean_message = process_and_send(claude_response, from_number, flow="free_chat")
