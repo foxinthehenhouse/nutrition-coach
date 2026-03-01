@@ -1,9 +1,5 @@
-import { View, Text } from "react-native";
+import { Redirect } from "expo-router";
 
 export default function AuthIndex() {
-  return (
-    <View>
-      <Text>Auth placeholder</Text>
-    </View>
-  );
+  return <Redirect href="/(auth)/login" />;
 }

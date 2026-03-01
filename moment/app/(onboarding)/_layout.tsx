@@ -1,12 +1,15 @@
 import { Stack } from "expo-router";
+import { AuthGuard } from "../../lib/auth";
 
 export default function OnboardingLayout() {
   return (
-    <Stack
-      screenOptions={{
-        headerShown: false,
-        contentStyle: { backgroundColor: "#080808" },
-      }}
-    />
+    <AuthGuard fallback="home">
+      <Stack
+        screenOptions={{
+          headerShown: false,
+          contentStyle: { backgroundColor: "#080808" },
+        }}
+      />
+    </AuthGuard>
   );
 }
