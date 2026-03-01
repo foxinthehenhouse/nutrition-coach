@@ -331,7 +331,26 @@ def log_to_conversation(inbound: str, outbound: str, source: str = "text", flow:
 
 
 def send_sms(to: str, body: str):
+    body = strip_sms_markdown(body) if body else body
     get_twilio().messages.create(body=body, from_=TWILIO_PHONE_NUMBER, to=to)
+
+
+# ---------------------------------------------------------------------------
+# SMS-friendly text (strip markdown — SMS doesn't support bold/formatting)
+# ---------------------------------------------------------------------------
+
+def strip_sms_markdown(text: str) -> str:
+    """Remove markdown so SMS displays plain text. Asterisks etc show literally otherwise."""
+    if not text:
+        return text
+    s = text
+    s = re.sub(r"\*\*(.+?)\*\*", r"\1", s)
+    s = re.sub(r"__(.+?)__", r"\1", s)
+    s = re.sub(r"\*(.+?)\*", r"\1", s)
+    s = re.sub(r"_(.+?)_", r"\1", s)
+    s = re.sub(r"`(.+?)`", r"\1", s)
+    s = re.sub(r"^#+\s*", "", s, flags=re.MULTILINE)
+    return s.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -1309,7 +1328,8 @@ INSTRUCTIONS:
 - Append structured meal data after any food log in this exact format, on its own line:
   <meal>{{"meal_type": "lunch", "calories": 650, "protein_g": 45, "carbs_g": 60, "fat_g": 18, \
 "fiber_g": 8, "sodium_mg": 420, "sugar_g": 12, "description": "chicken rice bowl with veg"}}</meal>
-- Never make the <meal> tag visible in your response to the user — it's parsed silently"""
+- Never make the <meal> tag visible in your response to the user — it's parsed silently
+- Use plain text only — no asterisks, markdown, or formatting (SMS doesn't support it)"""
 
 
 # ---------------------------------------------------------------------------
