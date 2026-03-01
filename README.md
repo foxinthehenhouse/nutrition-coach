@@ -22,6 +22,7 @@ A personal sports dietitian SMS bot built with FastAPI that integrates WHOOP bio
 | `GET` | `/auth/whoop` | Initiates WHOOP OAuth2 flow |
 | `GET` | `/auth/whoop/callback` | Handles OAuth2 callback, stores tokens |
 | `GET` | `/sync/whoop` | Fetches today's WHOOP data, upserts to DB |
+| `POST` | `/sync/whoop/backfill` | Backfills WHOOP history (requires `X-Admin-Token` when `SYNC_ADMIN_TOKEN` is set) |
 | `POST` | `/checkin/{period}` | Triggers scheduled check-in (morning/midday/evening/night) |
 | `GET` | `/debug/webhook` | Debug endpoint to verify all services are connected |
 
@@ -102,6 +103,7 @@ In the Railway dashboard, go to your service's **Variables** tab and add all key
 - `SUPABASE_DB_HOST` — PostgreSQL connection string
 - `SUPABASE_DB_PASSWORD` — Database password
 - `OWNER_PHONE_NUMBER` — Your phone number for proactive messages (e.g. +61456301777)
+- `SYNC_ADMIN_TOKEN` — optional token required for `POST /sync/whoop/backfill`
 
 Railway automatically sets the `PORT` environment variable.
 
@@ -114,7 +116,14 @@ Railway detects the `Procfile` and `runtime.txt` automatically:
 
 ### 4. Run Database Migrations
 
-Run the SQL in `migration.sql` against your Supabase database (SQL Editor in Supabase Dashboard).
+Run the SQL in `migration.sql` against your Supabase database (SQL Editor in Supabase Dashboard), then run all files in `supabase/migrations/`.
+Set timezone in the `settings` table so daily pacing aligns with local day boundaries:
+
+```sql
+insert into settings (key, value)
+values ('timezone', 'Australia/Sydney')
+on conflict (key) do update set value = excluded.value;
+```
 
 ### 5. Configure Twilio Webhook
 
@@ -146,6 +155,7 @@ Set up these scheduled HTTP requests in n8n (all times AEDT → UTC):
 | Every 5–15 min | — | `/sync/whoop` | GET |
 
 For real-time activity-driven updates, ensure WHOOP webhooks are registered (workout.updated, recovery.updated, sleep.updated). Workouts trigger instant post-workout meal advice.
+Recovery and sleep updates also trigger proactive behavior nudges (with cooldown throttling).
 
 Monday 9am AEDT pattern analysis is triggered automatically by the night summary flow.
 
@@ -161,6 +171,22 @@ Run `migration.sql` to create all tables. The schema includes:
 - **daily_plans** — daily intentions, training plans, meal plans, macro targets
 - **conversation_state** — state machine for multi-step conversation flows
 - **pattern_summaries** — weekly and monthly trend analysis results
+- **whoop_event_nudges** — per-event/day cooldown tracking for proactive WHOOP SMS
+
+## WHOOP Backfill + Validation
+
+Run a one-time backfill (example: 180 days, 7-day chunks):
+
+```bash
+curl -X POST "https://your-app.up.railway.app/sync/whoop/backfill?days=180&chunk_days=7" \
+  -H "X-Admin-Token: $SYNC_ADMIN_TOKEN"
+```
+
+Operational validation checklist:
+- `GET /sync/whoop` returns `status=synced` and current-day data
+- `POST /sync/whoop/backfill` updates historical dates in `whoop_cache`
+- Midday/evening checkpoints reflect local-day pace status (`behind/on_track/ahead`)
+- WHOOP `workout.updated`, `sleep.updated`, and `recovery.updated` each trigger at most one nudge per cooldown window
 
 ## Voice Note Support
 

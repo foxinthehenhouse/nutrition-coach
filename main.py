@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone, date, time as dt_time, timedelta
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 import openai
@@ -58,6 +59,7 @@ SUPABASE_DB_HOST = os.getenv("SUPABASE_DB_HOST")
 SUPABASE_DB_PASSWORD = os.getenv("SUPABASE_DB_PASSWORD")
 OWNER_PHONE_NUMBER = os.getenv("OWNER_PHONE_NUMBER")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+SYNC_ADMIN_TOKEN = os.getenv("SYNC_ADMIN_TOKEN")
 
 WHOOP_BASE_URL = "https://api.prod.whoop.com/developer"
 WHOOP_AUTH_URL = "https://api.prod.whoop.com/oauth/oauth2/auth"
@@ -65,6 +67,7 @@ WHOOP_TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token"
 WHOOP_SCOPES = "offline read:recovery read:cycles read:workout read:sleep read:profile read:body_measurement"
 
 USER_ID = "kyle"
+DEFAULT_TIMEZONE = "Australia/Sydney"
 
 # ---------------------------------------------------------------------------
 # Lazy-init clients
@@ -176,8 +179,48 @@ def get_settings() -> dict:
         return {}
 
 
+def get_user_timezone(settings: dict | None = None) -> ZoneInfo:
+    cfg = settings or get_settings()
+    tz_name = cfg.get("timezone") or cfg.get("tz") or DEFAULT_TIMEZONE
+    try:
+        return ZoneInfo(str(tz_name))
+    except ZoneInfoNotFoundError:
+        logger.warning(f"Invalid timezone '{tz_name}', defaulting to {DEFAULT_TIMEZONE}")
+        return ZoneInfo(DEFAULT_TIMEZONE)
+
+
+def get_local_now(settings: dict | None = None) -> datetime:
+    return datetime.now(timezone.utc).astimezone(get_user_timezone(settings))
+
+
+def get_local_today(settings: dict | None = None) -> date:
+    return get_local_now(settings).date()
+
+
+def _as_local_date_from_iso(ts: str, settings: dict | None = None) -> date | None:
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(get_user_timezone(settings)).date()
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_hms(value: str | None) -> dt_time | None:
+    if not value:
+        return None
+    raw = str(value).strip()
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            return datetime.strptime(raw, fmt).time()
+        except ValueError:
+            continue
+    return None
+
+
 def get_today_food_log() -> tuple[list[dict], dict]:
-    today_str = date.today().isoformat()
+    today_str = get_local_today().isoformat()
     result = get_supabase().table("food_log").select("*").eq("date", today_str).execute()
     rows = result.data or []
     totals = {
@@ -193,7 +236,7 @@ def get_today_food_log() -> tuple[list[dict], dict]:
 
 
 def get_today_whoop_cache() -> dict | None:
-    return get_whoop_cache(date.today())
+    return get_whoop_cache(get_local_today())
 
 
 def get_whoop_cache(target_date: date) -> dict | None:
@@ -203,13 +246,13 @@ def get_whoop_cache(target_date: date) -> dict | None:
 
 
 def get_today_daily_plan() -> dict | None:
-    today_str = date.today().isoformat()
+    today_str = get_local_today().isoformat()
     result = get_supabase().table("daily_plans").select("*").eq("date", today_str).execute()
     return result.data[0] if result.data else None
 
 
 def upsert_daily_plan(data: dict):
-    data["date"] = date.today().isoformat()
+    data["date"] = get_local_today().isoformat()
     get_supabase().table("daily_plans").upsert(data, on_conflict="date").execute()
 
 
@@ -280,9 +323,9 @@ def set_conversation_state(flow: str, step: int = 0, context: dict | None = None
 
 
 def log_food(meal_data: dict):
-    now = datetime.now(timezone.utc)
+    now = get_local_now()
     get_supabase().table("food_log").insert({
-        "date": date.today().isoformat(),
+        "date": now.date().isoformat(),
         "time": now.strftime("%H:%M:%S"),
         "meal_type": meal_data.get("meal_type", ""),
         "description": meal_data.get("description", ""),
@@ -775,6 +818,77 @@ def check_pace(target_kcal: int, eaten_kcal: int, current_hour: int) -> str:
     return "on_track"
 
 
+def _meal_signal_flags(food_rows: list[dict], now_local: datetime) -> dict:
+    breakfast_logged = False
+    lunch_logged = False
+    last_meal_dt: datetime | None = None
+
+    for row in food_rows:
+        meal_type = str(row.get("meal_type") or "").strip().lower()
+        t = _parse_hms(row.get("time"))
+        if meal_type == "breakfast" or (t and t.hour < 11):
+            breakfast_logged = True
+        if meal_type == "lunch" or (t and 11 <= t.hour < 16):
+            lunch_logged = True
+        if t:
+            meal_dt = datetime.combine(now_local.date(), t, tzinfo=now_local.tzinfo)
+            if last_meal_dt is None or meal_dt > last_meal_dt:
+                last_meal_dt = meal_dt
+
+    hours_since_last_meal = None
+    if last_meal_dt:
+        hours_since_last_meal = round((now_local - last_meal_dt).total_seconds() / 3600, 1)
+
+    missed_breakfast = now_local.hour >= 12 and not breakfast_logged
+    missed_lunch = now_local.hour >= 17 and not lunch_logged
+    long_gap = hours_since_last_meal is not None and hours_since_last_meal >= 5 and now_local.hour >= 11
+
+    return {
+        "breakfast_logged": breakfast_logged,
+        "lunch_logged": lunch_logged,
+        "missed_breakfast": missed_breakfast,
+        "missed_lunch": missed_lunch,
+        "long_gap_since_meal": long_gap,
+        "hours_since_last_meal": hours_since_last_meal,
+    }
+
+
+def build_daily_metrics(
+    settings: dict,
+    food_rows: list[dict],
+    food_totals: dict,
+    whoop_data: dict | None,
+    now_local: datetime | None = None,
+) -> dict:
+    now_local = now_local or get_local_now(settings)
+    strain = whoop_data.get("strain_score") if whoop_data else None
+    targets = get_targets(strain, settings)
+    expected_by_now = int(round(targets["calories"] * max(0, now_local.hour - 7) / 13))
+    eaten = int(food_totals.get("calories", 0) or 0)
+    remaining = targets["calories"] - eaten
+    pace_status = check_pace(targets["calories"], eaten, now_local.hour)
+    meal_signals = _meal_signal_flags(food_rows, now_local)
+    return {
+        "local_date": now_local.date().isoformat(),
+        "local_hour": now_local.hour,
+        "targets": targets,
+        "eaten": {
+            "calories": eaten,
+            "protein_g": float(food_totals.get("protein_g", 0) or 0),
+            "carbs_g": float(food_totals.get("carbs_g", 0) or 0),
+            "fat_g": float(food_totals.get("fat_g", 0) or 0),
+            "fiber_g": float(food_totals.get("fiber_g", 0) or 0),
+            "sodium_mg": float(food_totals.get("sodium_mg", 0) or 0),
+            "sugar_g": float(food_totals.get("sugar_g", 0) or 0),
+        },
+        "expected_calories_by_now": expected_by_now,
+        "delta_vs_pace": eaten - expected_by_now,
+        "remaining_calories": remaining,
+        "pace_status": pace_status,
+        "meal_signals": meal_signals,
+    }
+
+
 # ---------------------------------------------------------------------------
 # WHOOP token management
 # ---------------------------------------------------------------------------
@@ -845,137 +959,43 @@ async def _sync_whoop_background():
         logger.warning(f"Background Whoop sync failed: {e}")
 
 
-def _whoop_record_date(rec: dict, use_end: bool = True) -> date | None:
-    """Derive calendar date from WHOOP record. Uses end time if available (when user woke/finished)."""
+def _whoop_record_date(rec: dict, settings: dict | None = None, use_end: bool = True) -> date | None:
+    """Derive local calendar date from WHOOP record timestamps."""
     ts = rec.get("end") if use_end else rec.get("start")
     if not ts:
         ts = rec.get("created_at") or rec.get("updated_at")
     if not ts:
         return None
-    try:
-        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-        return dt.date()
-    except (ValueError, TypeError):
-        return None
+    return _as_local_date_from_iso(str(ts), settings)
 
 
-async def sync_whoop_today() -> dict:
-    """Sync WHOOP data for recent days. Uses 72h window to capture late-scored recovery/sleep."""
-    token = await get_whoop_token()
-    if not token:
-        return {}
+async def _whoop_get_records_paginated(
+    client: httpx.AsyncClient,
+    endpoint: str,
+    base_params: dict,
+    headers: dict,
+    max_pages: int = 30,
+) -> list[dict]:
+    records: list[dict] = []
+    next_token = None
+    pages = 0
+    while pages < max_pages:
+        params = base_params.copy()
+        if next_token:
+            params["nextToken"] = next_token
+        resp = await client.get(f"{WHOOP_BASE_URL}{endpoint}", params=params, headers=headers)
+        resp.raise_for_status()
+        payload = resp.json()
+        records.extend(payload.get("records", []))
+        next_token = payload.get("next_token") or payload.get("nextToken")
+        pages += 1
+        if not next_token:
+            break
+    return records
 
-    now = datetime.now(timezone.utc)
-    start_dt = now - timedelta(hours=72)
-    start_str = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    end_str = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    headers = {"Authorization": f"Bearer {token}"}
 
-    by_date: dict[str, dict] = {}
-
-    async with httpx.AsyncClient() as client:
-        # Cycles (strain, calories) — map by cycle end date
-        try:
-            resp = await client.get(
-                f"{WHOOP_BASE_URL}/v2/cycle",
-                params={"start": start_str, "end": end_str, "limit": 10},
-                headers=headers,
-            )
-            resp.raise_for_status()
-            for rec in resp.json().get("records", []):
-                if rec.get("score_state") != "SCORED" or not rec.get("score"):
-                    continue
-                d = _whoop_record_date(rec)
-                if not d:
-                    continue
-                key = d.isoformat()
-                if key not in by_date:
-                    by_date[key] = {}
-                kj = rec["score"].get("kilojoule", 0)
-                by_date[key]["strain_score"] = rec["score"].get("strain")
-                by_date[key]["calories_burned_kcal"] = round(kj / 4.184, 1) if kj else None
-        except Exception as e:
-            logger.error(f"Error fetching Whoop cycles: {e}")
-
-        # Recovery — map by created_at (when score landed)
-        try:
-            resp = await client.get(
-                f"{WHOOP_BASE_URL}/v2/recovery",
-                params={"start": start_str, "end": end_str, "limit": 10},
-                headers=headers,
-            )
-            resp.raise_for_status()
-            for rec in resp.json().get("records", []):
-                if rec.get("score_state") != "SCORED" or not rec.get("score"):
-                    continue
-                d = _whoop_record_date(rec, use_end=False)
-                if not d:
-                    ts = rec.get("created_at") or rec.get("updated_at")
-                    if ts:
-                        d = datetime.fromisoformat(str(ts).replace("Z", "+00:00")).date()
-                if not d:
-                    continue
-                key = d.isoformat()
-                if key not in by_date:
-                    by_date[key] = {}
-                by_date[key]["recovery_score"] = rec["score"].get("recovery_score")
-                by_date[key]["hrv_rmssd"] = rec["score"].get("hrv_rmssd_milli")
-                by_date[key]["resting_heart_rate"] = rec["score"].get("resting_heart_rate")
-        except Exception as e:
-            logger.error(f"Error fetching Whoop recovery: {e}")
-
-        # Sleep — map by sleep end date
-        try:
-            resp = await client.get(
-                f"{WHOOP_BASE_URL}/v2/activity/sleep",
-                params={"start": start_str, "end": end_str, "limit": 10},
-                headers=headers,
-            )
-            resp.raise_for_status()
-            for rec in resp.json().get("records", []):
-                if rec.get("score_state") != "SCORED" or not rec.get("score"):
-                    continue
-                d = _whoop_record_date(rec)
-                if not d:
-                    continue
-                key = d.isoformat()
-                if key not in by_date:
-                    by_date[key] = {}
-                by_date[key]["sleep_performance_pct"] = rec["score"].get("sleep_performance_percentage")
-                s_start, s_end = rec.get("start"), rec.get("end")
-                if s_start and s_end:
-                    start_t = datetime.fromisoformat(str(s_start).replace("Z", "+00:00"))
-                    end_t = datetime.fromisoformat(str(s_end).replace("Z", "+00:00"))
-                    by_date[key]["sleep_hours"] = round((end_t - start_t).total_seconds() / 3600, 2)
-        except Exception as e:
-            logger.error(f"Error fetching Whoop sleep: {e}")
-
-        # Workouts — most recent scored goes to today; map by workout end date
-        try:
-            resp = await client.get(
-                f"{WHOOP_BASE_URL}/v2/activity/workout",
-                params={"start": start_str, "end": end_str, "limit": 5},
-                headers=headers,
-            )
-            resp.raise_for_status()
-            for rec in resp.json().get("records", []):
-                if rec.get("score_state") != "SCORED" or not rec.get("score"):
-                    continue
-                d = _whoop_record_date(rec)
-                if not d:
-                    continue
-                key = d.isoformat()
-                if key not in by_date:
-                    by_date[key] = {}
-                kj = rec["score"].get("kilojoule", 0)
-                by_date[key]["workout_type"] = rec.get("sport_name")
-                by_date[key]["workout_strain"] = rec["score"].get("strain")
-                by_date[key]["workout_kcal"] = round(kj / 4.184, 1) if kj else None
-        except Exception as e:
-            logger.error(f"Error fetching Whoop workouts: {e}")
-
-    # Merge with existing cache (don't overwrite with None)
-    today_str = date.today().isoformat()
+def _merge_whoop_by_date(by_date: dict[str, dict], now: datetime | None = None):
+    now = now or datetime.now(timezone.utc)
     for d_str, data in by_date.items():
         existing = get_whoop_cache(date.fromisoformat(d_str)) if d_str else None
         merged = {k: v for k, v in (existing or {}).items() if v is not None and k != "id"}
@@ -986,7 +1006,162 @@ async def sync_whoop_today() -> dict:
                 merged[k] = v
         get_supabase().table("whoop_cache").upsert(merged, on_conflict="date").execute()
 
+
+async def _fetch_whoop_window(
+    token: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    settings: dict | None = None,
+) -> dict[str, dict]:
+    start_str = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    end_str = end_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    headers = {"Authorization": f"Bearer {token}"}
+    by_date: dict[str, dict] = {}
+
+    async with httpx.AsyncClient() as client:
+        # Cycles (strain, calories) — map by cycle end date
+        try:
+            cycle_records = await _whoop_get_records_paginated(
+                client,
+                "/v2/cycle",
+                {"start": start_str, "end": end_str, "limit": 25},
+                headers,
+            )
+            for rec in cycle_records:
+                if rec.get("score_state") != "SCORED" or not rec.get("score"):
+                    continue
+                d = _whoop_record_date(rec, settings=settings)
+                if not d:
+                    continue
+                key = d.isoformat()
+                by_date.setdefault(key, {})
+                kj = rec["score"].get("kilojoule", 0)
+                by_date[key]["strain_score"] = rec["score"].get("strain")
+                by_date[key]["calories_burned_kcal"] = round(kj / 4.184, 1) if kj else None
+        except Exception as e:
+            logger.error(f"Error fetching Whoop cycles: {e}")
+
+        # Recovery — map by start date and fallback to created/updated date
+        try:
+            recovery_records = await _whoop_get_records_paginated(
+                client,
+                "/v2/recovery",
+                {"start": start_str, "end": end_str, "limit": 25},
+                headers,
+            )
+            for rec in recovery_records:
+                if rec.get("score_state") != "SCORED" or not rec.get("score"):
+                    continue
+                d = _whoop_record_date(rec, settings=settings, use_end=False)
+                if not d:
+                    d = _as_local_date_from_iso(rec.get("created_at") or rec.get("updated_at"), settings)
+                if not d:
+                    continue
+                key = d.isoformat()
+                by_date.setdefault(key, {})
+                by_date[key]["recovery_score"] = rec["score"].get("recovery_score")
+                by_date[key]["hrv_rmssd"] = rec["score"].get("hrv_rmssd_milli")
+                by_date[key]["resting_heart_rate"] = rec["score"].get("resting_heart_rate")
+        except Exception as e:
+            logger.error(f"Error fetching Whoop recovery: {e}")
+
+        # Sleep — map by sleep end date
+        try:
+            sleep_records = await _whoop_get_records_paginated(
+                client,
+                "/v2/activity/sleep",
+                {"start": start_str, "end": end_str, "limit": 25},
+                headers,
+            )
+            for rec in sleep_records:
+                if rec.get("score_state") != "SCORED" or not rec.get("score"):
+                    continue
+                d = _whoop_record_date(rec, settings=settings)
+                if not d:
+                    continue
+                key = d.isoformat()
+                by_date.setdefault(key, {})
+                by_date[key]["sleep_performance_pct"] = rec["score"].get("sleep_performance_percentage")
+                s_start, s_end = rec.get("start"), rec.get("end")
+                if s_start and s_end:
+                    start_t = datetime.fromisoformat(str(s_start).replace("Z", "+00:00"))
+                    end_t = datetime.fromisoformat(str(s_end).replace("Z", "+00:00"))
+                    by_date[key]["sleep_hours"] = round((end_t - start_t).total_seconds() / 3600, 2)
+        except Exception as e:
+            logger.error(f"Error fetching Whoop sleep: {e}")
+
+        # Workouts — map by workout end date
+        try:
+            workout_records = await _whoop_get_records_paginated(
+                client,
+                "/v2/activity/workout",
+                {"start": start_str, "end": end_str, "limit": 25},
+                headers,
+            )
+            for rec in workout_records:
+                if rec.get("score_state") != "SCORED" or not rec.get("score"):
+                    continue
+                d = _whoop_record_date(rec, settings=settings)
+                if not d:
+                    continue
+                key = d.isoformat()
+                by_date.setdefault(key, {})
+                kj = rec["score"].get("kilojoule", 0)
+                by_date[key]["workout_type"] = rec.get("sport_name")
+                by_date[key]["workout_strain"] = rec["score"].get("strain")
+                by_date[key]["workout_kcal"] = round(kj / 4.184, 1) if kj else None
+        except Exception as e:
+            logger.error(f"Error fetching Whoop workouts: {e}")
+
+    return by_date
+
+
+async def sync_whoop_today() -> dict:
+    """Sync WHOOP data for recent days. Uses 72h window to capture late-scored recovery/sleep."""
+    token = await get_whoop_token()
+    if not token:
+        return {}
+
+    settings = get_settings()
+    now = datetime.now(timezone.utc)
+    start_dt = now - timedelta(hours=72)
+    by_date = await _fetch_whoop_window(token, start_dt, now, settings=settings)
+    _merge_whoop_by_date(by_date, now=now)
+
+    today_str = get_local_today(settings).isoformat()
     return by_date.get(today_str, get_today_whoop_cache() or {})
+
+
+async def backfill_whoop_history(days: int = 180, chunk_days: int = 7) -> dict:
+    """Backfill WHOOP history in chunks for trend analysis."""
+    token = await get_whoop_token()
+    if not token:
+        return {"error": "No valid Whoop token"}
+
+    settings = get_settings()
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=max(1, min(days, 730)))
+    chunk_days = max(1, min(chunk_days, 30))
+    cursor = start
+    chunks = 0
+    upserted_dates: set[str] = set()
+
+    while cursor < now:
+        end = min(cursor + timedelta(days=chunk_days), now)
+        by_date = await _fetch_whoop_window(token, cursor, end, settings=settings)
+        _merge_whoop_by_date(by_date, now=now)
+        upserted_dates.update(by_date.keys())
+        chunks += 1
+        cursor = end
+
+    return {
+        "status": "backfilled",
+        "days_requested": days,
+        "chunks_processed": chunks,
+        "dates_updated": len(upserted_dates),
+        "range_start_utc": start.isoformat(),
+        "range_end_utc": now.isoformat(),
+    }
 
 
 async def handle_image_entry(image_data: dict, from_number: str):
@@ -996,7 +1171,7 @@ async def handle_image_entry(image_data: dict, from_number: str):
 
     asyncio.create_task(_sync_whoop_background())
 
-    today = date.today()
+    today = get_local_today()
     try:
         whoop = get_whoop_cache(today)
         food_totals = await get_food_log_totals(today)
@@ -1118,8 +1293,8 @@ async def handle_image_confirmation(
         description = ", ".join([c.get("food", "") for c in components if c.get("food")]) if components else pending_meal.get("description", "")
 
         insert_row = {
-            "date": str(date.today()),
-            "time": datetime.now().strftime("%H:%M:%S"),
+            "date": str(get_local_today()),
+            "time": get_local_now().strftime("%H:%M:%S"),
             "meal_type": meal_type,
             "description": description,
             "calories": totals["calories"],
@@ -1155,9 +1330,10 @@ async def handle_image_confirmation(
             user_id=USER_ID,
         )
 
-        today_totals = await get_food_log_totals(date.today())
+        local_today = get_local_today()
+        today_totals = await get_food_log_totals(local_today)
         settings = get_settings()
-        whoop = get_whoop_cache(date.today())
+        whoop = get_whoop_cache(local_today)
         strain = whoop.get("strain_score", 0) if whoop else 0
         calorie_target = get_calorie_target(strain, settings)
         remaining = calorie_target - today_totals.get("calories", 0)
@@ -1288,14 +1464,18 @@ def build_system_prompt(
     food_totals: dict,
     memories: list,
     daily_plan: dict | None = None,
+    daily_metrics: dict | None = None,
 ) -> str:
+    daily_metrics = daily_metrics or build_daily_metrics(settings, food_rows, food_totals, whoop_data)
     strain = whoop_data.get("strain_score") if whoop_data else None
-    targets = get_targets(strain, settings)
-    remaining = targets["calories"] - food_totals["calories"]
+    targets = daily_metrics["targets"]
+    remaining = daily_metrics["remaining_calories"]
     goal_mode = settings.get("goal_mode", "maintenance")
     dietary_prefs = settings.get("dietary_preferences", "none")
-    current_hour = datetime.now(timezone.utc).hour
-    pace = check_pace(targets["calories"], food_totals["calories"], current_hour)
+    pace = daily_metrics["pace_status"]
+    local_hour = daily_metrics["local_hour"]
+    local_date = daily_metrics["local_date"]
+    signals = daily_metrics["meal_signals"]
 
     w = whoop_data or {}
     workout_type = w.get("workout_type", "none")
@@ -1343,7 +1523,7 @@ Monster day (Strain 17+): 3,100 kcal — distribute surplus over next 2 days
 If goal_mode = recomposition: reduce all calorie targets by 175 kcal
 
 TODAY'S WHOOP DATA:
-Date: {date.today().isoformat()}
+Date: {local_date}
 Strain: {w.get('strain_score', 'N/A')} | Calories burned so far: {w.get('calories_burned_kcal', 'N/A')} kcal
 Recovery: {w.get('recovery_score', 'N/A')}% | HRV: {w.get('hrv_rmssd', 'N/A')}ms | RHR: {w.get('resting_heart_rate', 'N/A')}bpm
 Sleep performance: {w.get('sleep_performance_pct', 'N/A')}%
@@ -1355,6 +1535,8 @@ Logged so far: {food_totals['calories']} kcal | Protein: {food_totals['protein_g
 Carbs: {food_totals['carbs_g']}g | Fat: {food_totals['fat_g']}g | Fiber: {food_totals['fiber_g']}g
 Today's target: {targets['calories']} kcal | Remaining: {remaining} kcal
 Nutrition pace: {pace} (on track / behind / ahead)
+Expected by this hour ({local_hour}:00 local): {daily_metrics['expected_calories_by_now']} kcal | Delta vs pace: {daily_metrics['delta_vs_pace']} kcal
+Meal logging signals: missed_breakfast={signals['missed_breakfast']}, missed_lunch={signals['missed_lunch']}, long_gap_since_meal={signals['long_gap_since_meal']}
 
 {food_summary}
 
@@ -1419,9 +1601,12 @@ def build_context_and_call(user_message: str, extra_mem_query: str | None = None
     food_rows, food_totals = get_today_food_log()
     whoop_data = get_today_whoop_cache()
     daily_plan = get_today_daily_plan()
+    daily_metrics = build_daily_metrics(settings, food_rows, food_totals, whoop_data)
     query = extra_mem_query or user_message
     memories = mem0_search(query)
-    system_prompt = build_system_prompt(settings, whoop_data, food_rows, food_totals, memories, daily_plan)
+    system_prompt = build_system_prompt(
+        settings, whoop_data, food_rows, food_totals, memories, daily_plan, daily_metrics=daily_metrics
+    )
     history = get_recent_conversation(limit=20, exclude_last_inbound=True)
     return call_claude(system_prompt, user_message, conversation_history=history)
 
@@ -1451,7 +1636,7 @@ def process_and_send(claude_response: str, to: str, flow: str | None = None) -> 
 
 def analyze_patterns(period: str = "weekly") -> dict:
     days = 7 if period == "weekly" else 30
-    end_date = date.today()
+    end_date = get_local_today()
     start_date = end_date - timedelta(days=days)
 
     food_result = (
@@ -1480,6 +1665,13 @@ def analyze_patterns(period: str = "weekly") -> dict:
     daily_cals = {}
     daily_protein = {}
     food_counts = {}
+    cals_by_date_and_hour: dict[str, dict[int, float]] = {}
+    protein_meals_by_date: dict[str, list[float]] = {}
+    first_meal_hours: list[float] = []
+    missed_breakfast_days = 0
+    missed_lunch_days = 0
+    long_gap_days = 0
+    date_to_times: dict[str, list[dt_time]] = {}
     for row in food_rows:
         d = row.get("date", "")
         daily_cals[d] = daily_cals.get(d, 0) + (row.get("calories") or 0)
@@ -1488,6 +1680,12 @@ def analyze_patterns(period: str = "weekly") -> dict:
         meal_type = row.get("meal_type", "unknown")
         key = f"{meal_type}:{desc}"
         food_counts[key] = food_counts.get(key, 0) + 1
+        t = _parse_hms(row.get("time"))
+        if t:
+            date_to_times.setdefault(d, []).append(t)
+            cals_by_date_and_hour.setdefault(d, {})
+            cals_by_date_and_hour[d][t.hour] = cals_by_date_and_hour[d].get(t.hour, 0.0) + float(row.get("calories") or 0)
+        protein_meals_by_date.setdefault(d, []).append(float(row.get("protein_g") or 0))
 
     total_days = len(set(daily_cals.keys())) or 1
     avg_calories = sum(daily_cals.values()) / total_days
@@ -1516,6 +1714,44 @@ def analyze_patterns(period: str = "weekly") -> dict:
     recovery_scores = [float(r["recovery_score"]) for r in whoop_rows if r.get("recovery_score")]
     avg_recovery = round(sum(recovery_scores) / len(recovery_scores), 1) if recovery_scores else None
 
+    late_calorie_loading_pct_by_day = []
+    protein_frontload_ratio_by_day = []
+    for d, day_total in daily_cals.items():
+        times = sorted(date_to_times.get(d, []))
+        if times:
+            first_meal_hours.append(times[0].hour + times[0].minute / 60)
+            has_breakfast = any(t.hour < 11 for t in times)
+            has_lunch = any(11 <= t.hour < 16 for t in times)
+            if not has_breakfast:
+                missed_breakfast_days += 1
+            if not has_lunch:
+                missed_lunch_days += 1
+            max_gap = 0.0
+            for i in range(1, len(times)):
+                prev = times[i - 1]
+                cur = times[i]
+                prev_h = prev.hour + prev.minute / 60
+                cur_h = cur.hour + cur.minute / 60
+                max_gap = max(max_gap, cur_h - prev_h)
+            if max_gap >= 6:
+                long_gap_days += 1
+        late_cal = sum(v for h, v in cals_by_date_and_hour.get(d, {}).items() if h >= 20)
+        if day_total:
+            late_calorie_loading_pct_by_day.append((late_cal / day_total) * 100)
+        proteins = protein_meals_by_date.get(d, [])
+        if proteins and sum(proteins) > 0:
+            morning_protein = 0.0
+            for idx, p in enumerate(proteins):
+                if idx < 2:
+                    morning_protein += p
+            protein_frontload_ratio_by_day.append((morning_protein / sum(proteins)) * 100)
+
+    meal_timing_std_hours = None
+    if len(first_meal_hours) >= 2:
+        avg_first = sum(first_meal_hours) / len(first_meal_hours)
+        variance = sum((h - avg_first) ** 2 for h in first_meal_hours) / len(first_meal_hours)
+        meal_timing_std_hours = round(variance ** 0.5, 2)
+
     summary = {
         "period": period,
         "period_start": start_date.isoformat(),
@@ -1530,6 +1766,16 @@ def analyze_patterns(period: str = "weekly") -> dict:
         "plans_confirmed": plan_confirmed,
         "avg_recovery": avg_recovery,
         "top_foods": top_foods,
+        "behavior_trends": {
+            "late_calorie_loading_pct_avg": round(sum(late_calorie_loading_pct_by_day) / len(late_calorie_loading_pct_by_day), 1)
+            if late_calorie_loading_pct_by_day else None,
+            "missed_breakfast_days": missed_breakfast_days,
+            "missed_lunch_days": missed_lunch_days,
+            "long_gap_days": long_gap_days,
+            "first_meal_timing_std_hours": meal_timing_std_hours,
+            "protein_frontload_pct_avg": round(sum(protein_frontload_ratio_by_day) / len(protein_frontload_ratio_by_day), 1)
+            if protein_frontload_ratio_by_day else None,
+        },
     }
 
     get_supabase().table("pattern_summaries").insert({
@@ -1553,7 +1799,8 @@ async def handle_morning_planning(step: int, context: dict, user_message: str = 
         settings = get_settings()
         whoop_data = get_today_whoop_cache()
         food_rows, food_totals = get_today_food_log()
-        system_prompt = build_system_prompt(settings, whoop_data, food_rows, food_totals, memories)
+        daily_metrics = build_daily_metrics(settings, food_rows, food_totals, whoop_data)
+        system_prompt = build_system_prompt(settings, whoop_data, food_rows, food_totals, memories, daily_metrics=daily_metrics)
         claude_msg = call_claude(
             system_prompt,
             "Generate Kyle's morning brief. Include: recovery score interpretation, HRV context "
@@ -1616,7 +1863,10 @@ async def handle_morning_planning(step: int, context: dict, user_message: str = 
         t_time = context.get("training_time", "N/A")
         training_planned = context.get("training_planned", False)
 
-        system_prompt = build_system_prompt(settings, whoop_data, food_rows, food_totals, memories, daily_plan)
+        daily_metrics = build_daily_metrics(settings, food_rows, food_totals, whoop_data)
+        system_prompt = build_system_prompt(
+            settings, whoop_data, food_rows, food_totals, memories, daily_plan, daily_metrics=daily_metrics
+        )
         training_info = f"training {t_type} at {t_time}" if training_planned else "no training planned"
         claude_msg = call_claude(
             system_prompt,
@@ -1665,7 +1915,10 @@ async def handle_morning_planning(step: int, context: dict, user_message: str = 
             whoop_data = get_today_whoop_cache()
             food_rows, food_totals = get_today_food_log()
             daily_plan = get_today_daily_plan()
-            system_prompt = build_system_prompt(settings, whoop_data, food_rows, food_totals, memories, daily_plan)
+            daily_metrics = build_daily_metrics(settings, food_rows, food_totals, whoop_data)
+            system_prompt = build_system_prompt(
+                settings, whoop_data, food_rows, food_totals, memories, daily_plan, daily_metrics=daily_metrics
+            )
             claude_msg = call_claude(
                 system_prompt,
                 f"Kyle wants changes to his meal plan. His request: '{user_message}'. "
@@ -1686,12 +1939,13 @@ async def handle_midday_checkin() -> str:
     food_rows, food_totals = get_today_food_log()
     whoop_data = get_today_whoop_cache()
     daily_plan = get_today_daily_plan()
-    system_prompt = build_system_prompt(settings, whoop_data, food_rows, food_totals, memories, daily_plan)
-
-    strain = whoop_data.get("strain_score") if whoop_data else None
-    targets = get_targets(strain, settings)
-    current_hour = datetime.now(timezone.utc).hour
-    pace_target = targets["calories"] * max(0, current_hour - 7) / 13
+    daily_metrics = build_daily_metrics(settings, food_rows, food_totals, whoop_data)
+    system_prompt = build_system_prompt(
+        settings, whoop_data, food_rows, food_totals, memories, daily_plan, daily_metrics=daily_metrics
+    )
+    targets = daily_metrics["targets"]
+    pace_target = daily_metrics["expected_calories_by_now"]
+    signals = daily_metrics["meal_signals"]
 
     claude_msg = call_claude(
         system_prompt,
@@ -1699,7 +1953,8 @@ async def handle_midday_checkin() -> str:
         f"({food_totals['calories']}) vs pace target ({round(pace_target)}), protein tracking "
         f"({food_totals['protein_g']}g / {targets['protein_g']}g). Identify the most important "
         f"gap right now. Suggest one specific adjustment to lunch based on where he's at. "
-        f"If he appears to have skipped breakfast, flag it gently. Ask if he's logged everything. "
+        f"Current pace status is {daily_metrics['pace_status']} with delta {daily_metrics['delta_vs_pace']} kcal. "
+        f"Breakfast logged={signals['breakfast_logged']}. Ask if he's logged everything. "
         f"Under 320 characters."
     )
     return process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="midday_checkin")
@@ -1712,18 +1967,21 @@ async def handle_evening_checkin() -> str:
     food_rows, food_totals = get_today_food_log()
     whoop_data = get_today_whoop_cache()
     daily_plan = get_today_daily_plan()
-    system_prompt = build_system_prompt(settings, whoop_data, food_rows, food_totals, memories, daily_plan)
-
-    strain = whoop_data.get("strain_score") if whoop_data else None
-    targets = get_targets(strain, settings)
-    remaining = targets["calories"] - food_totals["calories"]
+    daily_metrics = build_daily_metrics(settings, food_rows, food_totals, whoop_data)
+    system_prompt = build_system_prompt(
+        settings, whoop_data, food_rows, food_totals, memories, daily_plan, daily_metrics=daily_metrics
+    )
+    targets = daily_metrics["targets"]
+    remaining = daily_metrics["remaining_calories"]
+    signals = daily_metrics["meal_signals"]
 
     claude_msg = call_claude(
         system_prompt,
         f"Generate Kyle's 6pm check-in. Show calories remaining ({remaining}) vs target "
         f"({targets['calories']}). Assess if he's on track. If behind: suggest a specific dinner "
         f"adjustment to close the gap (e.g. 'add 40g extra rice and another chicken breast'). "
-        f"If ahead: suggest a lighter dinner option. Check if any meals appear unlogged. "
+        f"If ahead: suggest a lighter dinner option. Missing lunch={signals['missed_lunch']}, long_gap={signals['long_gap_since_meal']}. "
+        f"Check if any meals appear unlogged. "
         f"Ask if he trained as planned. Under 320 characters."
     )
     return process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="evening_checkin")
@@ -1735,7 +1993,10 @@ async def handle_post_workout(workout_data: dict | None = None) -> str:
     memories = mem0_search("post-workout nutrition habits")
     settings = get_settings()
     food_rows, food_totals = get_today_food_log()
-    system_prompt = build_system_prompt(settings, whoop_data, food_rows, food_totals, memories, daily_plan)
+    daily_metrics = build_daily_metrics(settings, food_rows, food_totals, whoop_data)
+    system_prompt = build_system_prompt(
+        settings, whoop_data, food_rows, food_totals, memories, daily_plan, daily_metrics=daily_metrics
+    )
 
     w = workout_data or whoop_data or {}
     sport = w.get("workout_type") or w.get("sport_name", "workout")
@@ -1743,9 +2004,7 @@ async def handle_post_workout(workout_data: dict | None = None) -> str:
     w_kcal = w.get("workout_kcal", "N/A")
     total_burn = whoop_data.get("calories_burned_kcal", "N/A") if whoop_data else "N/A"
 
-    strain = whoop_data.get("strain_score") if whoop_data else None
-    targets = get_targets(strain, settings)
-    remaining = targets["calories"] - food_totals["calories"]
+    remaining = daily_metrics["remaining_calories"]
 
     claude_msg = call_claude(
         system_prompt,
@@ -1766,10 +2025,13 @@ async def handle_night_summary() -> str:
     food_rows, food_totals = get_today_food_log()
     whoop_data = get_today_whoop_cache()
     daily_plan = get_today_daily_plan()
-    system_prompt = build_system_prompt(settings, whoop_data, food_rows, food_totals, memories, daily_plan)
+    daily_metrics = build_daily_metrics(settings, food_rows, food_totals, whoop_data)
+    system_prompt = build_system_prompt(
+        settings, whoop_data, food_rows, food_totals, memories, daily_plan, daily_metrics=daily_metrics
+    )
 
     strain = whoop_data.get("strain_score") if whoop_data else None
-    targets = get_targets(strain, settings)
+    targets = daily_metrics["targets"]
 
     claude_msg = call_claude(
         system_prompt,
@@ -1784,13 +2046,14 @@ async def handle_night_summary() -> str:
     )
     clean = process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="night_summary")
 
+    local_today = get_local_today(settings)
     mem0_add([
-        {"role": "user", "content": f"Day summary {date.today().isoformat()}: ate {food_totals['calories']} kcal, "
+        {"role": "user", "content": f"Day summary {local_today.isoformat()}: ate {food_totals['calories']} kcal, "
          f"{food_totals['protein_g']}g protein, strain {strain}"},
         {"role": "assistant", "content": claude_msg},
     ])
 
-    today = date.today()
+    today = local_today
     if today.weekday() == 0:
         try:
             summary = analyze_patterns(period="weekly")
@@ -1965,6 +2228,75 @@ async def process_sms_webhook(
             pass
 
 
+def _event_nudge_allowed(event_type: str, settings: dict, cooldown_minutes: int = 90) -> bool:
+    """Throttle proactive WHOOP nudges to avoid SMS spam."""
+    now_local = get_local_now(settings)
+    day_str = now_local.date().isoformat()
+    try:
+        result = (
+            get_supabase().table("whoop_event_nudges").select("*")
+            .eq("event_type", event_type)
+            .eq("date", day_str)
+            .limit(1)
+            .execute()
+        )
+        row = result.data[0] if result.data else None
+        if row and row.get("last_sent_at"):
+            sent_at = datetime.fromisoformat(str(row["last_sent_at"]).replace("Z", "+00:00"))
+            if sent_at.tzinfo is None:
+                sent_at = sent_at.replace(tzinfo=timezone.utc)
+            mins = (datetime.now(timezone.utc) - sent_at.astimezone(timezone.utc)).total_seconds() / 60
+            if mins < cooldown_minutes:
+                return False
+        get_supabase().table("whoop_event_nudges").upsert({
+            "event_type": event_type,
+            "date": day_str,
+            "last_sent_at": datetime.now(timezone.utc).isoformat(),
+        }, on_conflict="event_type,date").execute()
+        return True
+    except Exception as e:
+        logger.warning(f"whoop_event_nudges unavailable, using permissive fallback: {e}")
+        return True
+
+
+async def handle_sleep_update_nudge() -> str:
+    settings = get_settings()
+    food_rows, food_totals = get_today_food_log()
+    whoop_data = get_today_whoop_cache()
+    daily_plan = get_today_daily_plan()
+    memories = mem0_search("sleep nutrition recovery habits")
+    daily_metrics = build_daily_metrics(settings, food_rows, food_totals, whoop_data)
+    system_prompt = build_system_prompt(
+        settings, whoop_data, food_rows, food_totals, memories, daily_plan, daily_metrics=daily_metrics
+    )
+    claude_msg = call_claude(
+        system_prompt,
+        f"WHOOP sleep just synced. Send a proactive nudge based on sleep performance ({whoop_data.get('sleep_performance_pct') if whoop_data else 'N/A'}), "
+        f"recovery ({whoop_data.get('recovery_score') if whoop_data else 'N/A'}) and today's pace ({daily_metrics['pace_status']}). "
+        "Give one concrete behavior for the next meal. Ask one quick confirmation question. Under 300 characters.",
+    )
+    return process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="sleep_update")
+
+
+async def handle_recovery_update_nudge() -> str:
+    settings = get_settings()
+    food_rows, food_totals = get_today_food_log()
+    whoop_data = get_today_whoop_cache()
+    daily_plan = get_today_daily_plan()
+    memories = mem0_search("recovery fueling training readiness")
+    daily_metrics = build_daily_metrics(settings, food_rows, food_totals, whoop_data)
+    system_prompt = build_system_prompt(
+        settings, whoop_data, food_rows, food_totals, memories, daily_plan, daily_metrics=daily_metrics
+    )
+    claude_msg = call_claude(
+        system_prompt,
+        f"WHOOP recovery just updated. Send a proactive nudge using recovery ({whoop_data.get('recovery_score') if whoop_data else 'N/A'}) "
+        f"and today's remaining calories ({daily_metrics['remaining_calories']}). "
+        "Set effort expectation for the day and one specific nutrition action. Under 300 characters.",
+    )
+    return process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="recovery_update")
+
+
 async def process_whoop_webhook(payload: dict):
     """Process WHOOP webhook event in the background."""
     try:
@@ -1982,12 +2314,15 @@ async def process_whoop_webhook(payload: dict):
                 return
             log_conversation("system", f"whoop_trace:{trace_id}", flow="whoop_webhook")
 
+        settings = get_settings()
+
         if event_type == "recovery.updated":
             await sync_whoop_today()
-            now = datetime.now(timezone.utc)
-            hour = now.hour
+            hour = get_local_now(settings).hour
             if 5 <= hour <= 10:
                 await handle_morning_planning(0, {})
+            if _event_nudge_allowed(event_type, settings, cooldown_minutes=120):
+                await handle_recovery_update_nudge()
 
         elif event_type == "workout.updated":
             await sync_whoop_today()
@@ -1999,10 +2334,15 @@ async def process_whoop_webhook(payload: dict):
                     "workout_strain": workout["score"].get("strain"),
                     "workout_kcal": round(kj / 4.184, 1) if kj else None,
                 }
-                await handle_post_workout(workout_info)
+                if _event_nudge_allowed(event_type, settings, cooldown_minutes=75):
+                    await handle_post_workout(workout_info)
+            elif _event_nudge_allowed(event_type, settings, cooldown_minutes=75):
+                await handle_post_workout()
 
         elif event_type == "sleep.updated":
             await sync_whoop_today()
+            if _event_nudge_allowed(event_type, settings, cooldown_minutes=120):
+                await handle_sleep_update_nudge()
 
     except Exception as e:
         logger.error(f"WHOOP webhook processing error: {e}", exc_info=True)
@@ -2136,6 +2476,23 @@ async def sync_whoop():
     if not data:
         return JSONResponse(status_code=401, content={"error": "No valid Whoop token"})
     return {"status": "synced", "data": data}
+
+
+@app.post("/sync/whoop/backfill")
+async def sync_whoop_backfill(
+    request: Request,
+    days: int = 180,
+    chunk_days: int = 7,
+):
+    header_token = request.headers.get("X-Admin-Token", "")
+    if SYNC_ADMIN_TOKEN and header_token != SYNC_ADMIN_TOKEN:
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+    if days < 1 or days > 730:
+        return JSONResponse(status_code=400, content={"error": "days must be between 1 and 730"})
+    result = await backfill_whoop_history(days=days, chunk_days=chunk_days)
+    if result.get("error"):
+        return JSONResponse(status_code=401, content=result)
+    return result
 
 
 @app.post("/webhook/sms")
