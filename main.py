@@ -98,9 +98,13 @@ def get_claude() -> anthropic.Anthropic:
 
 def _parse_db_url(url: str) -> dict:
     """Parse a PostgreSQL connection string, handling special chars in passwords."""
-    if not url or not url.startswith("postgresql://"):
+    url = (url or "").strip()
+    if not url:
         return {}
-    stripped = url[len("postgresql://"):]
+    prefix = "postgresql://" if url.startswith("postgresql://") else "postgres://" if url.startswith("postgres://") else None
+    if not prefix:
+        return {}
+    stripped = url[len(prefix):]
     at_idx = stripped.rfind("@")
     if at_idx == -1:
         return {}
@@ -123,7 +127,8 @@ USER_ID = "kyle"
 def get_mem0() -> Memory:
     parsed = _parse_db_url(SUPABASE_DB_HOST)
     host = parsed.get("host", "localhost")
-    if host == "localhost" and SUPABASE_DB_HOST and not str(SUPABASE_DB_HOST).startswith("postgresql://"):
+    raw = (SUPABASE_DB_HOST or "").strip()
+    if host == "localhost" and raw and not (raw.startswith("postgresql://") or raw.startswith("postgres://")):
         logger.warning(
             "SUPABASE_DB_HOST should be a full postgresql:// URL. Got host=localhost; mem0 may fail. "
             "Example: postgresql://user:pass@host:5432/postgres"
@@ -135,8 +140,6 @@ def get_mem0() -> Memory:
         "user": parsed.get("user", "postgres"),
         "password": parsed.get("password") or SUPABASE_DB_PASSWORD,
     }
-    if "supabase.com" in host:
-        vector_config["sslmode"] = "require"
     config = {
         "vector_store": {
             "provider": "pgvector",
