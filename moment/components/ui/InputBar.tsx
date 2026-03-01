@@ -4,6 +4,7 @@ import {
   TextInput,
   Pressable,
   Animated,
+  ActivityIndicator,
   type NativeSyntheticEvent,
   type TextInputFocusEventData,
 } from "react-native";
@@ -16,6 +17,8 @@ type InputBarProps = {
   onSend: (text: string) => void;
   onCamera: () => void;
   onVoice: () => void;
+  isRecording?: boolean;
+  voiceLoading?: boolean;
 };
 
 export function InputBar({
@@ -24,6 +27,8 @@ export function InputBar({
   onSend,
   onCamera,
   onVoice,
+  isRecording,
+  voiceLoading,
 }: InputBarProps) {
   const [focused, setFocused] = React.useState(false);
   const sendScale = useRef(new Animated.Value(1)).current;
@@ -57,6 +62,7 @@ export function InputBar({
   };
 
   const iconColor = focused ? colors.textPrimary : colors.textDim;
+  const micColor = isRecording ? "#ef4444" : iconColor;
 
   return (
     <View>
@@ -97,7 +103,11 @@ export function InputBar({
             <Feather name="camera" size={22} color={iconColor} />
           </Pressable>
           <Pressable onPress={onVoice} hitSlop={12}>
-            <Feather name="mic" size={22} color={iconColor} />
+            {voiceLoading ? (
+              <ActivityIndicator size="small" color={iconColor} />
+            ) : (
+              <Feather name="mic" size={22} color={micColor} />
+            )}
           </Pressable>
           <Animated.View style={{ transform: [{ scale: sendScale }] }}>
             <Pressable
