@@ -591,67 +591,30 @@ CONFIDENCE SCORING:
 - LOW: blurry image, heavily mixed dish with no anchors, unusual cuisine,
   partially eaten food making original portion unclear
 
-RESPOND IN THIS EXACT JSON FORMAT — no other text, no markdown, no code blocks:
+OUTPUT FORMAT — You must respond with valid JSON only. No markdown, no code fences, no explanatory text before or after.
+
+JSON RULES (critical for parsing):
+- Use double quotes for all strings. No single quotes.
+- No trailing commas (e.g. "calories": 650, } is invalid — remove the comma before })
+- No comments. No // or /*
+- Escape quotes inside strings: use \\" not "
+- Keep string values simple; avoid line breaks or complex punctuation inside values
+
+REQUIRED STRUCTURE — Return this exact shape. All fields required unless optional is noted:
 {
-  "scene": {
-    "context": "home/restaurant/fast_food/packaged",
-    "plate_size_estimate": "10-inch dinner plate",
-    "meal_completeness": "full meal/partial/snack"
-  },
-  "components": [
-    {
-      "food": "grilled chicken breast",
-      "category": "protein",
-      "portion_estimate": "140g cooked",
-      "portion_reasoning": "palm-sized piece approximately 1 inch thick",
-      "calories": 185,
-      "protein_g": 35,
-      "carbs_g": 0,
-      "fat_g": 4,
-      "fiber_g": 0,
-      "sodium_mg": 65,
-      "sugar_g": 0,
-      "saturated_fat_g": 1,
-      "confidence": "high"
-    }
-  ],
-  "hidden_calories": [
-    {
-      "item": "olive oil cooking sheen visible on chicken",
-      "estimated_amount": "1 tbsp",
-      "calories_added": 120
-    }
-  ],
-  "totals": {
-    "calories": 650,
-    "protein_g": 45,
-    "carbs_g": 60,
-    "fat_g": 18,
-    "fiber_g": 8,
-    "sodium_mg": 420,
-    "sugar_g": 12,
-    "saturated_fat_g": 5
-  },
-  "meal_type": "breakfast/lunch/dinner/snack",
-  "overall_confidence": "high/medium/low",
-  "confidence_notes": "sauce quantity uncertain, rice portion estimated from bowl depth",
-  "uncertainty_items": ["sauce volume", "oil used in cooking"],
-  "sports_nutrition_flags": {
-    "protein_adequate": true,
-    "post_workout_suitable": true,
-    "micronutrient_alerts": ["sodium 420mg moderate"],
-    "inflammatory_risk": "low"
-  },
-  "sms_confirmation": "Grilled chicken, rice, roasted veg + olive oil — ~650 kcal, 45g protein, 60g carbs. Leaves you 980 kcal today. Sauce qty uncertain so may be ±50 kcal. Look right? Reply YES to log or correct me.",
-  "clarifying_question": null
+  "components": [{"food": "item name", "calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0}],
+  "totals": {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0, "fiber_g": 0, "sodium_mg": 0, "sugar_g": 0},
+  "meal_type": "breakfast" or "lunch" or "dinner" or "snack",
+  "overall_confidence": "high" or "medium" or "low",
+  "sms_confirmation": "One short sentence with kcal and protein, then: Reply YES to log or correct me."
 }
 
-If image quality is too poor or no food is visible return:
-{
-  "error": "cannot_analyze",
-  "reason": "specific reason here",
-  "sms_confirmation": "specific actionable message to user explaining the issue"
-}"""
+Optional: add "scene", "hidden_calories", "confidence_notes", "sports_nutrition_flags" if useful. Components can include more fields (portion_estimate, fiber_g, etc).
+
+If you cannot see food clearly or image is not a meal photo:
+{"error": "cannot_analyze", "sms_confirmation": "I could not identify the meal. Try a clearer photo or describe it in text."}
+
+Always respond with exactly one JSON object. Nothing else."""
 
     msg_content = [
         {
@@ -669,22 +632,31 @@ If image quality is too poor or no food is visible return:
     ]
     try:
         response = get_claude().messages.create(
-            model="claude-opus-4-6",
+            model="claude-sonnet-4-20250514",
             max_tokens=2048,
-            thinking={"type": "disabled"},
             system=system_prompt,
             messages=[{"role": "user", "content": msg_content}],
         )
     except Exception as e:
-        if "thinking" in str(e).lower():
+        logger.warning(f"Sonnet vision failed, trying Opus: {e}")
+        try:
             response = get_claude().messages.create(
                 model="claude-opus-4-6",
                 max_tokens=2048,
+                thinking={"type": "disabled"},
                 system=system_prompt,
                 messages=[{"role": "user", "content": msg_content}],
             )
-        else:
-            raise
+        except Exception as e2:
+            if "thinking" in str(e2).lower():
+                response = get_claude().messages.create(
+                    model="claude-opus-4-6",
+                    max_tokens=2048,
+                    system=system_prompt,
+                    messages=[{"role": "user", "content": msg_content}],
+                )
+            else:
+                raise
 
     if not response.content:
         raise ValueError("Claude returned empty response")
@@ -719,14 +691,14 @@ If image quality is too poor or no food is visible return:
     if result is None:
         raw_clean = raw.replace("\n", " ")[:500]
         logger.warning(f"Claude JSON parse failed: {last_err}. Raw: {raw_clean}")
-        raise ValueError("Analysis failed (invalid response). Please try again with a clearer photo.") from last_err
+        raise ValueError("Could not parse the analysis. Try again or describe your meal in text.") from last_err
 
     if "error" in result:
         raise ValueError(result.get("sms_confirmation", "Could not analyze image."))
 
     totals = result.get("totals")
     if not totals or not isinstance(totals, dict):
-        raise ValueError("Analysis incomplete. Please try again with a clearer photo.")
+        raise ValueError("Analysis incomplete. Try again or describe your meal in text.")
 
     if result.get("overall_confidence") == "medium":
         result["totals"]["calories"] = round((totals.get("calories") or 0) * 1.10)
@@ -1090,6 +1062,14 @@ async def handle_image_entry(image_data: dict, from_number: str):
         flow="image_confirmation",
     )
 
+    # Store image analysis in mem0 so preferences/patterns can be learned
+    components = analysis.get("components", [])
+    meal_desc = ", ".join(c.get("food", "") for c in components) if components else "meal"
+    mem0_add([
+        {"role": "user", "content": f"[Photo of meal] {meal_desc}"},
+        {"role": "assistant", "content": sms},
+    ])
+
 
 async def handle_image_confirmation(
     from_number: str, user_message: str, state_context: dict
@@ -1119,7 +1099,7 @@ async def handle_image_confirmation(
         totals = pending_meal["totals"]
         meal_type = pending_meal.get("meal_type", "meal")
         components = pending_meal.get("components", [])
-        description = ", ".join([c["food"] for c in components]) if components else pending_meal.get("description", "")
+        description = ", ".join([c.get("food", "") for c in components if c.get("food")]) if components else pending_meal.get("description", "")
 
         insert_row = {
             "date": str(date.today()),
@@ -1395,8 +1375,9 @@ def mem0_add(messages: list):
     try:
         memory = get_mem0()
         memory.add(messages=messages, user_id=USER_ID)
+        logger.info(f"Mem0 add OK for user_id={USER_ID}")
     except Exception as e:
-        logger.error(f"Mem0 add failed: {e}")
+        logger.error(f"Mem0 add failed: {e}", exc_info=True)
 
 # ---------------------------------------------------------------------------
 # Claude call helper
@@ -2051,7 +2032,15 @@ async def api_food(request: Request):
             log_food(meal_data)
         except Exception as e:
             logger.error(f"api_food log_food failed: {e}")
+        mem0_add([
+            {"role": "user", "content": f"Log: {description}"},
+            {"role": "assistant", "content": clean_message},
+        ])
         return {"message": clean_message, "logged": meal_data}
+    mem0_add([
+        {"role": "user", "content": description},
+        {"role": "assistant", "content": clean_message},
+    ])
     return {"message": clean_message}
 
 
@@ -2246,6 +2235,30 @@ async def debug_webhook():
         steps["conversation_state"] = f"FAIL: {e}"
     steps["all_passed"] = True
     return {"steps": steps}
+
+
+@app.get("/debug/mem0")
+async def debug_mem0():
+    """List memories for user_id=kyle to verify mem0 is capturing data."""
+    try:
+        memory = get_mem0()
+        # Broad search to get recent memories
+        result = memory.search(
+            query="food preferences meals training schedule goals",
+            user_id=USER_ID,
+        )
+        memories = result if isinstance(result, list) else []
+        return {
+            "user_id": USER_ID,
+            "count": len(memories),
+            "memories": [
+                {"memory": m.get("memory", str(m)), "metadata": m.get("metadata", {})}
+                for m in memories
+            ],
+        }
+    except Exception as e:
+        logger.error(f"debug_mem0 failed: {e}", exc_info=True)
+        return {"error": str(e), "type": type(e).__name__}
 
 
 @app.get("/debug/voice")
