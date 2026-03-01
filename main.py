@@ -292,6 +292,39 @@ def log_conversation(direction: str, message: str, flow: str | None = None, sour
     get_supabase().table("conversation_log").insert(row).execute()
 
 
+def get_recent_conversation(limit: int = 24, exclude_last_inbound: bool = False) -> list[dict]:
+    """Fetch recent user/assistant turns for multi-turn context. Returns list of {role, content}."""
+    try:
+        result = (
+            get_supabase().table("conversation_log")
+            .select("direction, message")
+            .in_("direction", ["inbound", "outbound"])
+            .neq("message", "")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = result.data or []
+        if exclude_last_inbound and rows and rows[0].get("direction") == "inbound":
+            rows = rows[1:]
+        rows = [r for r in reversed(rows) if not (r.get("message") or "").startswith("whoop_trace:")]
+        messages = []
+        prev_role, prev_content = None, None
+        for r in rows:
+            role = "user" if r.get("direction") == "inbound" else "assistant"
+            content = (r.get("message") or "").strip()
+            if not content:
+                continue
+            if role == prev_role and content == prev_content:
+                continue
+            prev_role, prev_content = role, content
+            messages.append({"role": role, "content": content})
+        return messages
+    except Exception as e:
+        logger.warning(f"get_recent_conversation failed: {e}")
+        return []
+
+
 def log_to_conversation(inbound: str, outbound: str, source: str = "text", flow: str = "free_chat"):
     log_conversation("inbound", inbound, flow=flow, source=source)
     log_conversation("outbound", outbound, flow=flow, source="system")
@@ -594,17 +627,35 @@ If image quality is too poor or no food is visible return:
     if raw is None:
         raise ValueError(f"Claude returned unexpected block type: {type(block).__name__}")
     raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
+    # Extract JSON from markdown blocks or free text
+    if "```" in raw:
+        parts = raw.split("```")
+        for p in parts[1:]:
+            p = p.strip()
+            if p.lower().startswith("json"):
+                p = p[4:].strip()
+            if p.startswith("{"):
+                raw = p
+                break
+    elif "{" in raw and "}" in raw:
+        start = raw.index("{")
+        depth, end = 0, start
+        for i, c in enumerate(raw[start:], start):
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        raw = raw[start : end + 1]
     raw = raw.replace("```", "").strip()
 
     try:
         result = json.loads(raw)
     except json.JSONDecodeError as e:
-        logger.error(f"Claude returned invalid JSON: {raw[:500]}")
-        raise ValueError(f"Analysis failed (invalid response). Please try again.") from e
+        logger.warning(f"Claude JSON parse attempt failed: {e}. Raw (first 600 chars): {raw[:600]}")
+        raise ValueError("Analysis failed (invalid response). Please try again with a clearer photo.") from e
 
     if "error" in result:
         raise ValueError(result.get("sms_confirmation", "Could not analyze image."))
@@ -742,99 +793,148 @@ async def _sync_whoop_background():
         logger.warning(f"Background Whoop sync failed: {e}")
 
 
+def _whoop_record_date(rec: dict, use_end: bool = True) -> date | None:
+    """Derive calendar date from WHOOP record. Uses end time if available (when user woke/finished)."""
+    ts = rec.get("end") if use_end else rec.get("start")
+    if not ts:
+        ts = rec.get("created_at") or rec.get("updated_at")
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        return dt.date()
+    except (ValueError, TypeError):
+        return None
+
+
 async def sync_whoop_today() -> dict:
+    """Sync WHOOP data for recent days. Uses 72h window to capture late-scored recovery/sleep."""
     token = await get_whoop_token()
     if not token:
         return {}
 
     now = datetime.now(timezone.utc)
-    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    start = midnight.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    end = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    start_dt = now - timedelta(hours=72)
+    start_str = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    end_str = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
     headers = {"Authorization": f"Bearer {token}"}
 
-    whoop_data: dict = {}
+    by_date: dict[str, dict] = {}
 
     async with httpx.AsyncClient() as client:
-        # Cycles
+        # Cycles (strain, calories) — map by cycle end date
         try:
             resp = await client.get(
                 f"{WHOOP_BASE_URL}/v2/cycle",
-                params={"start": start, "end": end, "limit": 1},
+                params={"start": start_str, "end": end_str, "limit": 10},
                 headers=headers,
             )
             resp.raise_for_status()
             for rec in resp.json().get("records", []):
-                if rec.get("score_state") == "SCORED" and rec.get("score"):
-                    whoop_data["strain_score"] = rec["score"].get("strain")
-                    kj = rec["score"].get("kilojoule", 0)
-                    whoop_data["calories_burned_kcal"] = round(kj / 4.184, 1) if kj else None
-                    break
+                if rec.get("score_state") != "SCORED" or not rec.get("score"):
+                    continue
+                d = _whoop_record_date(rec)
+                if not d:
+                    continue
+                key = d.isoformat()
+                if key not in by_date:
+                    by_date[key] = {}
+                kj = rec["score"].get("kilojoule", 0)
+                by_date[key]["strain_score"] = rec["score"].get("strain")
+                by_date[key]["calories_burned_kcal"] = round(kj / 4.184, 1) if kj else None
         except Exception as e:
             logger.error(f"Error fetching Whoop cycles: {e}")
 
-        # Recovery
+        # Recovery — map by created_at (when score landed)
         try:
             resp = await client.get(
                 f"{WHOOP_BASE_URL}/v2/recovery",
-                params={"start": start, "end": end, "limit": 1},
+                params={"start": start_str, "end": end_str, "limit": 10},
                 headers=headers,
             )
             resp.raise_for_status()
             for rec in resp.json().get("records", []):
-                if rec.get("score_state") == "SCORED" and rec.get("score"):
-                    whoop_data["recovery_score"] = rec["score"].get("recovery_score")
-                    whoop_data["hrv_rmssd"] = rec["score"].get("hrv_rmssd_milli")
-                    whoop_data["resting_heart_rate"] = rec["score"].get("resting_heart_rate")
-                    break
+                if rec.get("score_state") != "SCORED" or not rec.get("score"):
+                    continue
+                d = _whoop_record_date(rec, use_end=False)
+                if not d:
+                    ts = rec.get("created_at") or rec.get("updated_at")
+                    if ts:
+                        d = datetime.fromisoformat(str(ts).replace("Z", "+00:00")).date()
+                if not d:
+                    continue
+                key = d.isoformat()
+                if key not in by_date:
+                    by_date[key] = {}
+                by_date[key]["recovery_score"] = rec["score"].get("recovery_score")
+                by_date[key]["hrv_rmssd"] = rec["score"].get("hrv_rmssd_milli")
+                by_date[key]["resting_heart_rate"] = rec["score"].get("resting_heart_rate")
         except Exception as e:
             logger.error(f"Error fetching Whoop recovery: {e}")
 
-        # Sleep
+        # Sleep — map by sleep end date
         try:
             resp = await client.get(
                 f"{WHOOP_BASE_URL}/v2/activity/sleep",
-                params={"start": start, "end": end, "limit": 1},
+                params={"start": start_str, "end": end_str, "limit": 10},
                 headers=headers,
             )
             resp.raise_for_status()
             for rec in resp.json().get("records", []):
-                if rec.get("score_state") == "SCORED" and rec.get("score"):
-                    whoop_data["sleep_performance_pct"] = rec["score"].get("sleep_performance_percentage")
-                    s_start = rec.get("start")
-                    s_end = rec.get("end")
-                    if s_start and s_end:
-                        s = datetime.fromisoformat(s_start.replace("Z", "+00:00"))
-                        e = datetime.fromisoformat(s_end.replace("Z", "+00:00"))
-                        whoop_data["sleep_hours"] = round((e - s).total_seconds() / 3600, 2)
-                    break
+                if rec.get("score_state") != "SCORED" or not rec.get("score"):
+                    continue
+                d = _whoop_record_date(rec)
+                if not d:
+                    continue
+                key = d.isoformat()
+                if key not in by_date:
+                    by_date[key] = {}
+                by_date[key]["sleep_performance_pct"] = rec["score"].get("sleep_performance_percentage")
+                s_start, s_end = rec.get("start"), rec.get("end")
+                if s_start and s_end:
+                    start_t = datetime.fromisoformat(str(s_start).replace("Z", "+00:00"))
+                    end_t = datetime.fromisoformat(str(s_end).replace("Z", "+00:00"))
+                    by_date[key]["sleep_hours"] = round((end_t - start_t).total_seconds() / 3600, 2)
         except Exception as e:
             logger.error(f"Error fetching Whoop sleep: {e}")
 
-        # Workouts (most recent scored)
+        # Workouts — most recent scored goes to today; map by workout end date
         try:
             resp = await client.get(
                 f"{WHOOP_BASE_URL}/v2/activity/workout",
-                params={"start": start, "end": end, "limit": 5},
+                params={"start": start_str, "end": end_str, "limit": 5},
                 headers=headers,
             )
             resp.raise_for_status()
             for rec in resp.json().get("records", []):
-                if rec.get("score_state") == "SCORED" and rec.get("score"):
-                    whoop_data["workout_type"] = rec.get("sport_name")
-                    whoop_data["workout_strain"] = rec["score"].get("strain")
-                    kj = rec["score"].get("kilojoule", 0)
-                    whoop_data["workout_kcal"] = round(kj / 4.184, 1) if kj else None
-                    break
+                if rec.get("score_state") != "SCORED" or not rec.get("score"):
+                    continue
+                d = _whoop_record_date(rec)
+                if not d:
+                    continue
+                key = d.isoformat()
+                if key not in by_date:
+                    by_date[key] = {}
+                kj = rec["score"].get("kilojoule", 0)
+                by_date[key]["workout_type"] = rec.get("sport_name")
+                by_date[key]["workout_strain"] = rec["score"].get("strain")
+                by_date[key]["workout_kcal"] = round(kj / 4.184, 1) if kj else None
         except Exception as e:
             logger.error(f"Error fetching Whoop workouts: {e}")
 
-    upsert_payload = {"date": date.today().isoformat(), "last_updated": now.isoformat()}
-    for k, v in whoop_data.items():
-        if v is not None:
-            upsert_payload[k] = v
-    get_supabase().table("whoop_cache").upsert(upsert_payload, on_conflict="date").execute()
-    return whoop_data
+    # Merge with existing cache (don't overwrite with None)
+    today_str = date.today().isoformat()
+    for d_str, data in by_date.items():
+        existing = get_whoop_cache(date.fromisoformat(d_str)) if d_str else None
+        merged = {k: v for k, v in (existing or {}).items() if v is not None and k != "id"}
+        merged["date"] = d_str
+        merged["last_updated"] = now.isoformat()
+        for k, v in data.items():
+            if v is not None:
+                merged[k] = v
+        get_supabase().table("whoop_cache").upsert(merged, on_conflict="date").execute()
+
+    return by_date.get(today_str, get_today_whoop_cache() or {})
 
 
 async def handle_image_entry(image_data: dict, from_number: str):
@@ -1159,10 +1259,13 @@ def build_system_prompt(
 
     mem_text = "\n".join(m.get("memory", str(m)) for m in memories) if memories else "No memories yet."
 
-    return f"""You are Kyle's personal sports dietitian — PhD-level expertise in performance nutrition, \
-exercise physiology, and behavior change. You communicate via SMS so be concise, warm, \
-and direct. No fluff. You know Kyle well and your tone reflects that — like a knowledgeable \
-friend who happens to have a PhD, not a clinical robot.
+    return f"""You are Kyle's personal nutrition coach — a supportive, knowledgeable guide who provides \
+helpful advice on food, training nutrition, and habits. You have PhD-level expertise in performance \
+nutrition and exercise physiology, but you communicate like a warm, direct friend — no fluff. \
+You maintain context across the conversation and react appropriately to ANY prompt: meal logging, \
+questions, follow-ups, setbacks, wins, cravings, travel, eating out, or "I'm struggling." \
+Always be encouraging and practical. If something isn't clear, ask. If he shares a challenge, \
+offer specific, actionable support.
 
 KYLE'S BASELINE PROFILE:
 BMR: ~1,700 kcal/day
@@ -1234,18 +1337,22 @@ def mem0_add(messages: list):
 # Claude call helper
 # ---------------------------------------------------------------------------
 
-def call_claude(system_prompt: str, user_message: str) -> str:
+def call_claude(system_prompt: str, user_message: str, conversation_history: list[dict] | None = None) -> str:
+    messages = []
+    if conversation_history:
+        messages.extend(conversation_history)
+    messages.append({"role": "user", "content": user_message})
     response = get_claude().messages.create(
         model="claude-opus-4-6",
         max_tokens=1024,
         system=system_prompt,
-        messages=[{"role": "user", "content": user_message}],
+        messages=messages,
     )
     return response.content[0].text
 
 
 def build_context_and_call(user_message: str, extra_mem_query: str | None = None) -> str:
-    """Full context build + Claude call. Returns raw Claude response."""
+    """Full context build + Claude call. Returns raw Claude response. Uses multi-turn history."""
     settings = get_settings()
     food_rows, food_totals = get_today_food_log()
     whoop_data = get_today_whoop_cache()
@@ -1253,7 +1360,8 @@ def build_context_and_call(user_message: str, extra_mem_query: str | None = None
     query = extra_mem_query or user_message
     memories = mem0_search(query)
     system_prompt = build_system_prompt(settings, whoop_data, food_rows, food_totals, memories, daily_plan)
-    return call_claude(system_prompt, user_message)
+    history = get_recent_conversation(limit=20, exclude_last_inbound=True)
+    return call_claude(system_prompt, user_message, conversation_history=history)
 
 
 def process_and_send(claude_response: str, to: str, flow: str | None = None) -> str:
@@ -1579,11 +1687,12 @@ async def handle_post_workout(workout_data: dict | None = None) -> str:
 
     claude_msg = call_claude(
         system_prompt,
-        f"Generate a post-workout message for Kyle. He just completed {sport} — {w_strain} strain, "
-        f"{w_kcal} kcal burned. His total burn today is now {total_burn}. "
-        f"Remaining calories: {remaining}. Tell him exactly what to eat in the next 45 minutes "
-        f"(specific foods, grams of protein and carbs). Reference what he usually eats post-workout "
-        f"if known from memories. Ask what he had. Under 300 characters."
+        f"Generate a post-workout message for Kyle. His {sport} just synced from WHOOP — {w_strain} strain, "
+        f"{w_kcal} kcal burned. Total burn today: {total_burn}. "
+        f"REAL-TIME ADJUSTMENT: He should add {remaining} kcal to his remaining meals today. "
+        f"Tell him exactly what to eat in the next 45 min (specific foods, grams of protein and carbs). "
+        f"Reference his usual post-workout habits from memories if known. "
+        f"End with asking what he had. Under 320 characters."
     )
     return process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="post_workout")
 
@@ -1819,6 +1928,7 @@ async def process_whoop_webhook(payload: dict):
                 await handle_morning_planning(0, {})
 
         elif event_type == "workout.updated":
+            await sync_whoop_today()
             workout = await fetch_workout_by_id(event_id) if event_id else None
             if workout and workout.get("score_state") == "SCORED" and workout.get("score"):
                 kj = workout["score"].get("kilojoule", 0)
@@ -1827,14 +1937,6 @@ async def process_whoop_webhook(payload: dict):
                     "workout_strain": workout["score"].get("strain"),
                     "workout_kcal": round(kj / 4.184, 1) if kj else None,
                 }
-                now = datetime.now(timezone.utc)
-                get_supabase().table("whoop_cache").upsert({
-                    "date": date.today().isoformat(),
-                    "workout_type": workout_info["workout_type"],
-                    "workout_strain": workout_info["workout_strain"],
-                    "workout_kcal": workout_info["workout_kcal"],
-                    "last_updated": now.isoformat(),
-                }, on_conflict="date").execute()
                 await handle_post_workout(workout_info)
 
         elif event_type == "sleep.updated":
@@ -1863,6 +1965,29 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/api/food")
+async def api_food(request: Request):
+    """Accept food description from the Moment app; parse with Claude, log to food_log."""
+    body = await request.json()
+    description = (body.get("description") or "").strip()
+    if not description:
+        return JSONResponse(status_code=400, content={"error": "description required"})
+    try:
+        response = build_context_and_call(description)
+    except Exception as e:
+        logger.error(f"api_food build_context_and_call failed: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    clean_message, meal_data = parse_meal_data(response)
+    if meal_data:
+        meal_data["source"] = "app"
+        try:
+            log_food(meal_data)
+        except Exception as e:
+            logger.error(f"api_food log_food failed: {e}")
+        return {"message": clean_message, "logged": meal_data}
+    return {"message": clean_message}
 
 
 @app.get("/auth/whoop")
@@ -1963,6 +2088,12 @@ async def webhook_sms(request: Request, background_tasks: BackgroundTasks):
         logger.error(f"Webhook parse error: {e}", exc_info=True)
 
     return twiml_empty
+
+
+@app.get("/webhook/whoop")
+async def webhook_whoop_get():
+    """GET returns a helpful message; WHOOP sends POST with event payloads."""
+    return {"status": "ok", "message": "WHOOP webhooks require POST. Configure this URL in WHOOP Developer Dashboard with events: workout.updated, recovery.updated, sleep.updated."}
 
 
 @app.post("/webhook/whoop")

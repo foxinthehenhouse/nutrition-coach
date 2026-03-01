@@ -143,7 +143,9 @@ Set up these scheduled HTTP requests in n8n (all times AEDT → UTC):
 | 12:00 PM | 1:00 AM | `/checkin/midday` | POST |
 | 6:00 PM | 7:00 AM | `/checkin/evening` | POST |
 | 9:00 PM | 10:00 AM | `/checkin/night` | POST |
-| Every 3 hours | — | `/sync/whoop` | GET |
+| Every 5–15 min | — | `/sync/whoop` | GET |
+
+For real-time activity-driven updates, ensure WHOOP webhooks are registered (workout.updated, recovery.updated, sleep.updated). Workouts trigger instant post-workout meal advice.
 
 Monday 9am AEDT pattern analysis is triggered automatically by the night summary flow.
 
