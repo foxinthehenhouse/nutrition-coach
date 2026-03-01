@@ -20,6 +20,7 @@ import certifi
 import imageio_ffmpeg
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response, BackgroundTasks
+from fastapi import File, UploadFile, Form
 from fastapi.responses import JSONResponse, RedirectResponse
 from supabase import create_client, Client
 from twilio.rest import Client as TwilioClient
@@ -2398,6 +2399,190 @@ async def api_food(request: Request):
         {"role": "assistant", "content": clean_message},
     ])
     return {"message": clean_message}
+
+
+@app.post("/api/food/image")
+async def api_food_image(
+    file: UploadFile = File(...),
+    phone: str = Form(default="__app_user__"),
+):
+    image_bytes = await file.read()
+    if not (file.content_type or "").startswith("image/"):
+        return JSONResponse(status_code=400, content={"error": "image required"})
+
+    image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+
+    today = get_local_today()
+    whoop = get_whoop_cache(today)
+    food_totals = await get_food_log_totals(today)
+    daily_plan = get_today_daily_plan()
+    settings = get_settings()
+    strain = whoop.get("strain_score", 0) if whoop else 0
+    calorie_target = get_calorie_target(strain, settings)
+    recent_meals = await get_recent_food_log_descriptions(today, limit=3)
+    context = {
+        "calorie_target": calorie_target,
+        "eaten_calories": food_totals.get("calories", 0),
+        "eaten_protein": food_totals.get("protein_g", 0),
+        "remaining_calories": calorie_target - food_totals.get("calories", 0),
+        "protein_target": settings.get("protein_goal_g", 160),
+        "carb_target": settings.get("carb_goal_g", 220),
+        "fat_target": settings.get("fat_goal_g", 70),
+        "food_memories": [],
+        "recent_meals": recent_meals,
+        "recovery_score": whoop.get("recovery_score") if whoop else None,
+        "daily_plan": daily_plan,
+    }
+
+    try:
+        analysis = await analyze_meal_image(
+            image_base64,
+            file.content_type,
+            context,
+        )
+    except ValueError as e:
+        return JSONResponse(status_code=422, content={"error": str(e)})
+    except Exception as e:
+        logger.error(f"api_food_image analyze failed: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+    await update_conversation_state_by_phone(
+        phone,
+        flow="image_confirmation",
+        step=1,
+        context={"pending_meal": analysis, "from_number": phone},
+    )
+
+    return {
+        "sms_confirmation": analysis.get("sms_confirmation", ""),
+        "analysis": {
+            "components": analysis.get("components", []),
+            "totals": analysis.get("totals", {}),
+            "meal_type": analysis.get("meal_type", ""),
+            "overall_confidence": analysis.get("overall_confidence", ""),
+        },
+        "pending_id": phone,
+    }
+
+
+@app.post("/api/food/image/confirm")
+async def api_food_image_confirm(request: Request):
+    body = await request.json()
+    phone = body.get("phone", "")
+    confirmed = body.get("confirmed", False)
+    correction = body.get("correction", "").strip()
+
+    state = await get_conversation_state_by_phone(phone)
+    if state.get("flow") != "image_confirmation":
+        return JSONResponse(status_code=400, content={"error": "no pending image"})
+
+    pending_meal = state.get("context", {}).get("pending_meal")
+    if not pending_meal:
+        return JSONResponse(status_code=400, content={"error": "no pending meal"})
+
+    if correction and (not confirmed):
+        try:
+            updated = await apply_meal_correction(correction, pending_meal)
+            await update_conversation_state_by_phone(
+                phone,
+                flow="image_confirmation",
+                step=1,
+                context={"pending_meal": updated, "from_number": phone},
+            )
+            return {
+                "status": "corrected",
+                "sms_confirmation": updated.get("sms_confirmation", ""),
+                "analysis": {
+                    "components": updated.get("components", []),
+                    "totals": updated.get("totals", {}),
+                    "meal_type": updated.get("meal_type", ""),
+                },
+            }
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"error": str(e)})
+
+    if confirmed:
+        totals = pending_meal["totals"]
+        components = pending_meal.get("components", [])
+        description = ", ".join([c.get("food", "") for c in components if c.get("food")]) or "meal"
+        meal_type = pending_meal.get("meal_type", "meal")
+        insert_row = {
+            "date": str(get_local_today()),
+            "time": get_local_now().strftime("%H:%M:%S"),
+            "meal_type": meal_type,
+            "description": description,
+            "calories": totals["calories"],
+            "protein_g": totals["protein_g"],
+            "carbs_g": totals["carbs_g"],
+            "fat_g": totals["fat_g"],
+            "fiber_g": totals.get("fiber_g", 0),
+            "sodium_mg": totals.get("sodium_mg", 0),
+            "sugar_g": totals.get("sugar_g", 0),
+            "source": "app_image",
+        }
+        get_supabase().table("food_log").insert(insert_row).execute()
+        await update_conversation_state_by_phone(phone, flow="free_chat", step=0, context={})
+        today_totals = await get_food_log_totals(get_local_today())
+        remaining = calorie_target - today_totals.get("calories", 0) if (
+            calorie_target := get_calorie_target(
+                get_whoop_cache(get_local_today()).get("strain_score") if get_whoop_cache(get_local_today()) else None,
+                get_settings()
+            )
+        ) else 2500 - today_totals.get("calories", 0)
+        return {
+            "status": "logged",
+            "logged": insert_row,
+            "message": f"Logged ✓ {totals['calories']} kcal · {totals['protein_g']}g protein · {remaining} kcal remaining today",
+        }
+
+    return {"status": "pending"}
+
+
+@app.post("/api/food/voice")
+async def api_food_voice(file: UploadFile = File(...)):
+    audio_bytes = await file.read()
+    content_type = file.content_type or "audio/m4a"
+
+    try:
+        openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        ext = AUDIO_EXTENSION_MAP.get(content_type.split(";")[0].strip(), "m4a")
+        filename = f"audio.{ext}"
+        transcript = openai_client.audio.transcriptions.create(
+            model="whisper-1",
+            file=(filename, audio_bytes, "audio/mpeg"),
+            prompt="This is a meal description for nutrition tracking.",
+        )
+        transcribed_text = transcript.text
+    except Exception as e:
+        logger.error(f"api_food_voice transcription failed: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+    try:
+        claude_input = (
+            "[This message was transcribed from a voice note. Parse it as a meal entry.] "
+            + transcribed_text
+        )
+        response = build_context_and_call(claude_input)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+    clean_message, meal_data = parse_meal_data(response)
+    if meal_data:
+        meal_data["source"] = "app_voice"
+        try:
+            log_food(meal_data)
+        except Exception as e:
+            logger.error(f"api_food_voice log_food failed: {e}")
+        return {
+            "transcription": transcribed_text,
+            "message": clean_message,
+            "logged": meal_data,
+        }
+
+    return {
+        "transcription": transcribed_text,
+        "message": clean_message,
+    }
 
 
 @app.get("/auth/whoop")
