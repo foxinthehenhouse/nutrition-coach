@@ -447,6 +447,45 @@ def _safe_json(obj) -> str:
         return str(obj) if obj else "none"
 
 
+def _extract_json_from_response(raw: str) -> str:
+    """Extract JSON object from Claude response (markdown, wrappers, etc)."""
+    if not raw:
+        return raw
+    if "```" in raw:
+        for part in raw.split("```")[1:]:
+            part = part.strip()
+            if part.lower().startswith("json"):
+                part = part[4:].lstrip()
+            if part.startswith("{"):
+                return part.strip()
+    if "{" in raw and "}" in raw:
+        start = raw.index("{")
+        depth = 0
+        in_str = None
+        escape = False
+        for i, c in enumerate(raw[start:], start):
+            if escape:
+                escape = False
+                continue
+            if c == "\\" and in_str:
+                escape = True
+                continue
+            if in_str:
+                if c == in_str:
+                    in_str = None
+                continue
+            if c in '"\'':
+                in_str = c
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return raw[start : i + 1]
+    return raw.strip()
+
+
 async def analyze_meal_image(
     image_base64: str, content_type: str, context: dict
 ) -> dict:
@@ -614,67 +653,73 @@ If image quality is too poor or no food is visible return:
   "sms_confirmation": "specific actionable message to user explaining the issue"
 }"""
 
-    response = get_claude().messages.create(
-        model="claude-opus-4-6",
-        max_tokens=2048,
-        system=system_prompt,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": content_type,
-                            "data": image_base64,
-                        },
-                    },
-                    {
-                        "type": "text",
-                        "text": f"{context_str}\n\nAnalyze this meal image following your protocol exactly. Return JSON only.",
-                    },
-                ],
-            }
-        ],
-    )
+    msg_content = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": content_type,
+                "data": image_base64,
+            },
+        },
+        {
+            "type": "text",
+            "text": f"{context_str}\n\nAnalyze this meal image following your protocol exactly. Return JSON only. No markdown, no code blocks, no other text — just the raw JSON object.",
+        },
+    ]
+    try:
+        response = get_claude().messages.create(
+            model="claude-opus-4-6",
+            max_tokens=2048,
+            thinking={"type": "disabled"},
+            system=system_prompt,
+            messages=[{"role": "user", "content": msg_content}],
+        )
+    except Exception as e:
+        if "thinking" in str(e).lower():
+            response = get_claude().messages.create(
+                model="claude-opus-4-6",
+                max_tokens=2048,
+                system=system_prompt,
+                messages=[{"role": "user", "content": msg_content}],
+            )
+        else:
+            raise
 
     if not response.content:
         raise ValueError("Claude returned empty response")
-    block = response.content[0]
-    raw = getattr(block, "text", None)
-    if raw is None:
-        raise ValueError(f"Claude returned unexpected block type: {type(block).__name__}")
-    raw = raw.strip()
-    # Extract JSON from markdown blocks or free text
-    if "```" in raw:
-        parts = raw.split("```")
-        for p in parts[1:]:
-            p = p.strip()
-            if p.lower().startswith("json"):
-                p = p[4:].strip()
-            if p.startswith("{"):
-                raw = p
-                break
-    elif "{" in raw and "}" in raw:
-        start = raw.index("{")
-        depth, end = 0, start
-        for i, c in enumerate(raw[start:], start):
-            if c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    end = i
-                    break
-        raw = raw[start : end + 1]
-    raw = raw.replace("```", "").strip()
 
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError as e:
-        logger.warning(f"Claude JSON parse attempt failed: {e}. Raw (first 600 chars): {raw[:600]}")
-        raise ValueError("Analysis failed (invalid response). Please try again with a clearer photo.") from e
+    raw = ""
+    for block in response.content:
+        block_type = block.get("type", "") if isinstance(block, dict) else getattr(block, "type", "")
+        if block_type == "thinking":
+            continue
+        t = block.get("text") or block.get("thinking") if isinstance(block, dict) else (getattr(block, "text", None) or getattr(block, "thinking", None))
+        if t:
+            raw += t if isinstance(t, str) else str(t)
+    if not raw.strip():
+        types = [b.get("type", type(b).__name__) if isinstance(b, dict) else getattr(b, "type", type(b).__name__) for b in response.content]
+        raise ValueError(f"Claude returned no text (block types: {types})")
+    raw = raw.strip()
+
+    if os.getenv("IMAGE_DEBUG"):
+        logger.info(f"Image analysis raw response (first 1200 chars): {raw[:1200]}")
+
+    raw = _extract_json_from_response(raw)
+
+    result = None
+    last_err = None
+    for attempt in [raw, re.sub(r",\s*}", "}", raw), re.sub(r",\s*]", "]", raw)]:
+        try:
+            result = json.loads(attempt)
+            break
+        except json.JSONDecodeError as e:
+            last_err = e
+            continue
+    if result is None:
+        raw_clean = raw.replace("\n", " ")[:500]
+        logger.warning(f"Claude JSON parse failed: {last_err}. Raw: {raw_clean}")
+        raise ValueError("Analysis failed (invalid response). Please try again with a clearer photo.") from last_err
 
     if "error" in result:
         raise ValueError(result.get("sms_confirmation", "Could not analyze image."))
