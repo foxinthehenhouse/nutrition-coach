@@ -122,16 +122,25 @@ USER_ID = "kyle"
 
 def get_mem0() -> Memory:
     parsed = _parse_db_url(SUPABASE_DB_HOST)
+    host = parsed.get("host", "localhost")
+    if host == "localhost" and SUPABASE_DB_HOST and not str(SUPABASE_DB_HOST).startswith("postgresql://"):
+        logger.warning(
+            "SUPABASE_DB_HOST should be a full postgresql:// URL. Got host=localhost; mem0 may fail. "
+            "Example: postgresql://user:pass@host:5432/postgres"
+        )
+    vector_config = {
+        "host": host,
+        "port": parsed.get("port", 5432),
+        "dbname": parsed.get("dbname", "postgres"),
+        "user": parsed.get("user", "postgres"),
+        "password": parsed.get("password") or SUPABASE_DB_PASSWORD,
+    }
+    if "supabase.com" in host:
+        vector_config["sslmode"] = "require"
     config = {
         "vector_store": {
             "provider": "pgvector",
-            "config": {
-                "host": parsed.get("host", "localhost"),
-                "port": parsed.get("port", 5432),
-                "dbname": parsed.get("dbname", "postgres"),
-                "user": parsed.get("user", "postgres"),
-                "password": parsed.get("password") or SUPABASE_DB_PASSWORD,
-            },
+            "config": vector_config,
         },
         "llm": {
             "provider": "anthropic",
@@ -602,14 +611,18 @@ JSON RULES (critical for parsing):
 
 REQUIRED STRUCTURE — Return this exact shape. All fields required unless optional is noted:
 {
-  "components": [{"food": "item name", "calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0}],
+  "components": [{"food": "item name", "portion_estimate": "140g", "calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0}],
   "totals": {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0, "fiber_g": 0, "sodium_mg": 0, "sugar_g": 0},
   "meal_type": "breakfast" or "lunch" or "dinner" or "snack",
   "overall_confidence": "high" or "medium" or "low",
-  "sms_confirmation": "One short sentence with kcal and protein, then: Reply YES to log or correct me."
+  "sms_confirmation": "MUST include: (1) Each ingredient with approx portion, e.g. Grilled chicken 140g, rice 150g, roasted veg. (2) Totals line: X kcal | Xg P | Xg C | Xg F. (3) End with: Reply YES to log or correct me. Keep under 400 chars total."
 }
 
-Optional: add "scene", "hidden_calories", "confidence_notes", "sports_nutrition_flags" if useful. Components can include more fields (portion_estimate, fiber_g, etc).
+SMS_CONFIRMATION FORMAT — Structure it as:
+- Line 1: Ingredients list with portions (e.g. Chicken 140g, rice 150g, broccoli 80g)
+- Line 2: Macros (e.g. 650 kcal | 45g P | 60g C | 18g F. Reply YES to log or correct me.)
+
+Optional: add "scene", "hidden_calories", "confidence_notes", "sports_nutrition_flags" if useful.
 
 If you cannot see food clearly or image is not a meal photo:
 {"error": "cannot_analyze", "sms_confirmation": "I could not identify the meal. Try a clearer photo or describe it in text."}
