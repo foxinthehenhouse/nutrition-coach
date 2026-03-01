@@ -1,8 +1,27 @@
-import { useState, useEffect } from "react";
-import { View, Text, TextInput, Pressable, ActivityIndicator } from "react-native";
-import { router } from "expo-router";
+import { useState } from "react";
+import {
+  View,
+  Text,
+  TextInput,
+  Pressable,
+  ActivityIndicator,
+  Platform,
+} from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { LinearGradient } from "expo-linear-gradient";
 import { supabase } from "../../lib/supabase";
-import { colors, fontFamily } from "../../lib/theme";
+import { fontFamily, holoGradient } from "../../lib/theme";
+
+let MaskedView: React.ComponentType<any> | null = null;
+if (Platform.OS !== "web") {
+  try {
+    MaskedView =
+      require("@react-native-masked-view/masked-view").default ??
+      require("@react-native-masked-view/masked-view").MaskedView;
+  } catch {
+    MaskedView = null;
+  }
+}
 
 function getRedirectUrl(): string {
   const envUrl = process.env.EXPO_PUBLIC_APP_URL?.trim();
@@ -13,11 +32,43 @@ function getRedirectUrl(): string {
   return "https://moment.up.railway.app";
 }
 
+function Wordmark() {
+  const textStyle = {
+    fontFamily: fontFamily.bold,
+    fontSize: 38,
+    letterSpacing: -1,
+  } as const;
+
+  if (MaskedView) {
+    return (
+      <MaskedView
+        maskElement={
+          <Text style={[textStyle, { backgroundColor: "transparent" }]}>
+            moment
+          </Text>
+        }
+      >
+        <LinearGradient
+          colors={[...holoGradient]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0 }}
+        >
+          <Text style={[textStyle, { opacity: 0 }]}>moment</Text>
+        </LinearGradient>
+      </MaskedView>
+    );
+  }
+
+  return <Text style={[textStyle, { color: "#f0f0f0" }]}>moment</Text>;
+}
+
 export default function AuthLogin() {
+  const insets = useSafeAreaInsets();
   const [email, setEmail] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
+  const [focused, setFocused] = useState(false);
 
   const handleMagicLink = async () => {
     if (!email.trim()) {
@@ -41,153 +92,153 @@ export default function AuthLogin() {
     setSent(true);
   };
 
-  const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL ?? "";
-  const isConfigured = Boolean(supabaseUrl);
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      console.log("[Moment] EXPO_PUBLIC_SUPABASE_URL:", isConfigured ? "set" : "not set");
-    }
-  }, [isConfigured]);
+  const disabled = loading || !email.trim();
 
   if (sent) {
     return (
-      <View style={{ flex: 1, padding: 24, justifyContent: "center" }}>
-        <Text
+      <View
+        style={{
+          flex: 1,
+          backgroundColor: "#080808",
+          paddingTop: insets.top,
+          paddingBottom: insets.bottom,
+          justifyContent: "center",
+          alignItems: "center",
+        }}
+      >
+        <View
           style={{
-            fontFamily: fontFamily.bold,
-            fontSize: 24,
-            color: colors.textPrimary,
-            marginBottom: 12,
-          }}
-        >
-          Check your email
-        </Text>
-        <Text
-          style={{
-            fontFamily: fontFamily.regular,
-            fontSize: 16,
-            color: colors.textMuted,
-            marginBottom: 24,
-            lineHeight: 24,
-          }}
-        >
-          We sent a magic link to {email}. Click the link to sign in.
-        </Text>
-        <Pressable
-          onPress={() => setSent(false)}
-          style={{
-            backgroundColor: "transparent",
-            borderWidth: 1,
-            borderColor: colors.border,
-            borderRadius: 12,
-            padding: 16,
+            maxWidth: 320,
+            width: "100%",
+            alignSelf: "center",
             alignItems: "center",
           }}
         >
-          <Text style={{ fontFamily: fontFamily.regular, fontSize: 16, color: colors.textPrimary }}>
-            Use a different email
+          <Text
+            style={{
+              fontFamily: fontFamily.bold,
+              fontSize: 20,
+              color: "#f0f0f0",
+            }}
+          >
+            check your inbox
           </Text>
-        </Pressable>
-        <Text
-          style={{
-            fontFamily: fontFamily.regular,
-            fontSize: 12,
-            color: colors.textMuted,
-            marginTop: 24,
-          }}
-        >
-          Supabase: {isConfigured ? "configured" : "not configured"}
-        </Text>
+          <Text
+            style={{
+              fontFamily: fontFamily.regular,
+              fontSize: 14,
+              color: "#444444",
+              marginTop: 8,
+            }}
+          >
+            {email}
+          </Text>
+        </View>
       </View>
     );
   }
 
   return (
-    <View style={{ flex: 1, padding: 24, justifyContent: "center" }}>
-      <Text
+    <View
+      style={{
+        flex: 1,
+        backgroundColor: "#080808",
+        paddingTop: insets.top,
+        paddingBottom: insets.bottom,
+        justifyContent: "center",
+        alignItems: "center",
+      }}
+    >
+      <View
         style={{
-          fontFamily: fontFamily.bold,
-          fontSize: 24,
-          color: colors.textPrimary,
-          marginBottom: 24,
+          maxWidth: 320,
+          width: "100%",
+          alignSelf: "center",
         }}
       >
-        Sign in
-      </Text>
-      <Text
-        style={{
-          fontFamily: fontFamily.regular,
-          fontSize: 14,
-          color: colors.textMuted,
-          marginBottom: 16,
-        }}
-      >
-        Enter your email and we'll send you a magic link to sign in—no password needed.
-      </Text>
+        <View style={{ alignItems: "center" }}>
+          <Wordmark />
+        </View>
 
-      <TextInput
-        placeholder="Email"
-        placeholderTextColor={colors.textMuted}
-        value={email}
-        onChangeText={setEmail}
-        autoCapitalize="none"
-        keyboardType="email-address"
-        autoComplete="email"
-        style={{
-          fontFamily: fontFamily.regular,
-          fontSize: 16,
-          color: colors.textPrimary,
-          backgroundColor: colors.surface,
-          borderWidth: 1,
-          borderColor: colors.border,
-          borderRadius: 12,
-          padding: 14,
-          marginBottom: 16,
-        }}
-      />
+        <View style={{ height: 72 }} />
 
-      {error && (
+        <TextInput
+          placeholder="email"
+          placeholderTextColor="#282828"
+          value={email}
+          onChangeText={setEmail}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          autoCapitalize="none"
+          autoCorrect={false}
+          keyboardType="email-address"
+          style={{
+            fontFamily: fontFamily.regular,
+            fontSize: 15,
+            color: "#f0f0f0",
+            backgroundColor: "#0f0f0f",
+            borderWidth: 1,
+            borderColor: focused ? "rgba(168,237,234,0.25)" : "#1c1c1c",
+            borderRadius: 14,
+            padding: 16,
+          }}
+        />
+
+        {error && (
+          <Text
+            style={{
+              fontFamily: fontFamily.regular,
+              fontSize: 12,
+              color: "#ef4444",
+              marginTop: 8,
+              marginBottom: -2,
+            }}
+          >
+            {error}
+          </Text>
+        )}
+
+        <Pressable
+          onPress={handleMagicLink}
+          disabled={loading}
+          style={{
+            height: 50,
+            borderRadius: 14,
+            backgroundColor: disabled
+              ? "rgba(240,240,240,0.08)"
+              : "#f0f0f0",
+            justifyContent: "center",
+            alignItems: "center",
+            marginTop: 10,
+          }}
+        >
+          {loading ? (
+            <ActivityIndicator color="#080808" />
+          ) : (
+            <Text
+              style={{
+                fontFamily: fontFamily.bold,
+                fontSize: 15,
+                color: disabled ? "#444444" : "#080808",
+              }}
+            >
+              continue
+            </Text>
+          )}
+        </Pressable>
+
         <Text
           style={{
             fontFamily: fontFamily.regular,
-            fontSize: 14,
-            color: colors.red,
-            marginBottom: 12,
+            fontSize: 12,
+            color: "#1e1e1e",
+            textAlign: "center",
+            marginTop: 16,
           }}
         >
-          {error}
+          magic link. no password.
         </Text>
-      )}
-
-      <Pressable
-        onPress={handleMagicLink}
-        disabled={loading}
-        style={{
-          backgroundColor: colors.green,
-          borderRadius: 12,
-          padding: 16,
-          alignItems: "center",
-        }}
-      >
-        {loading ? (
-          <ActivityIndicator color={colors.textPrimary} />
-        ) : (
-          <Text style={{ fontFamily: fontFamily.bold, fontSize: 16, color: colors.textPrimary }}>
-            Send magic link
-          </Text>
-        )}
-      </Pressable>
-
-      <Text
-        style={{
-          fontFamily: fontFamily.regular,
-          fontSize: 12,
-          color: colors.textMuted,
-          marginTop: 24,
-        }}
-      >
-        Supabase: {isConfigured ? "configured" : "not configured"}
-      </Text>
+      </View>
     </View>
   );
 }
