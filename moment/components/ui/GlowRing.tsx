@@ -91,29 +91,31 @@ export function GlowRing({
           />
         </G>
       </Svg>
-      <View style={{ alignItems: "center", justifyContent: "center" }}>
-        <Text
-          style={{
-            fontFamily: fontFamily.bold,
-            fontSize: labelSize,
-            color: colors.textPrimary,
-          }}
-        >
-          {centerLabel}
-        </Text>
-        {centerSublabel != null && (
+      {(centerLabel !== "" || centerSublabel != null) && (
+        <View style={{ alignItems: "center", justifyContent: "center" }}>
           <Text
             style={{
-              fontFamily: fontFamily.regular,
-              fontSize: 10,
-              color: colors.textMuted,
-              marginTop: 2,
+              fontFamily: fontFamily.bold,
+              fontSize: labelSize,
+              color: colors.textPrimary,
             }}
           >
-            {centerSublabel}
+            {centerLabel}
           </Text>
-        )}
-      </View>
+          {centerSublabel != null && (
+            <Text
+              style={{
+                fontFamily: fontFamily.regular,
+                fontSize: 10,
+                color: colors.textMuted,
+                marginTop: 2,
+              }}
+            >
+              {centerSublabel}
+            </Text>
+          )}
+        </View>
+      )}
     </View>
   );
 }

@@ -40,6 +40,16 @@ export function strainColor(strain: number): string {
   return colors.red;
 }
 
+export const spacing = {
+  contentPadding: 24,
+  touchTargetMin: 44,
+} as const;
+
+export const radius = {
+  input: 14,
+  card: 12,
+} as const;
+
 export const fontFamily = {
   regular: "Geist_400Regular",
   bold: "Geist_700Bold",

@@ -276,7 +276,15 @@ export default function OnboardingIndex() {
           paddingBottom: 40,
         }}
       >
-        <Pressable onPress={() => setMode(null)} style={{ marginBottom: 32 }}>
+        <Pressable
+          onPress={() => setMode(null)}
+          style={{
+            marginBottom: 32,
+            minHeight: 44,
+            justifyContent: "center",
+            alignSelf: "flex-start",
+          }}
+        >
           <Feather name="chevron-left" size={20} color="#444444" />
         </Pressable>
 
@@ -301,6 +309,20 @@ export default function OnboardingIndex() {
           onBlur={() => setFocusedField(null)}
           style={inputStyle("weight")}
         />
+
+        {disabled && (
+          <Text
+            style={{
+              fontFamily: fontFamily.regular,
+              fontSize: 12,
+              color: "#444444",
+              marginTop: 4,
+              marginBottom: 8,
+            }}
+          >
+            Name and weight help set your targets.
+          </Text>
+        )}
 
         <Text
           style={{

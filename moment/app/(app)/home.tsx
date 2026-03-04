@@ -24,7 +24,7 @@ import { logFood } from "../../lib/api";
 import { GlowRing } from "../../components/ui/GlowRing";
 import { InputBar } from "../../components/ui/InputBar";
 import { StatPill } from "../../components/ui/StatPill";
-import { colors, fontFamily, recoveryColor } from "../../lib/theme";
+import { colors, fontFamily, recoveryColor, spacing } from "../../lib/theme";
 
 const QUICK_PILLS = [
   "post-workout 🥩",
@@ -536,7 +536,10 @@ export default function Home() {
     }
 
     return (
-      <Pressable onPress={() => router.push("/(onboarding)/whoop")}>
+      <Pressable
+        onPress={() => router.push("/(onboarding)/whoop")}
+        style={{ paddingVertical: 12 }}
+      >
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
           <View
             style={{
@@ -562,7 +565,7 @@ export default function Home() {
 
   const renderFoodItem = ({ item }: { item: any }) => (
     <View>
-      <View style={{ paddingHorizontal: 20, paddingVertical: 14 }}>
+      <View style={{ paddingHorizontal: spacing.contentPadding, paddingVertical: 14 }}>
         <View
           style={{
             flexDirection: "row",
@@ -643,7 +646,7 @@ export default function Home() {
         style={{
           height: 1,
           backgroundColor: "#111111",
-          marginHorizontal: 20,
+          marginHorizontal: spacing.contentPadding,
         }}
       />
     </View>
@@ -661,7 +664,7 @@ export default function Home() {
       <View
         style={{
           paddingTop: insets.top + 12,
-          paddingHorizontal: 20,
+          paddingHorizontal: spacing.contentPadding,
           paddingBottom: 16,
           borderBottomWidth: 1,
           borderBottomColor: "#111111",
@@ -673,7 +676,7 @@ export default function Home() {
       {/* Zone B — Input */}
       <View
         style={{
-          paddingHorizontal: 20,
+          paddingHorizontal: spacing.contentPadding,
           paddingTop: 16,
           paddingBottom: 8,
         }}
@@ -752,10 +755,10 @@ export default function Home() {
       <View
         style={{
           backgroundColor: "#080808",
-          borderTopWidth: 1,
-          borderTopColor: "#111111",
-          paddingHorizontal: 20,
-          paddingTop: 12,
+borderTopWidth: 1,
+            borderTopColor: "#111111",
+            paddingHorizontal: spacing.contentPadding,
+            paddingTop: 12,
           paddingBottom: 10,
         }}
       >

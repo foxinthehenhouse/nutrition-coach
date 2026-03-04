@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { View, Text, ScrollView, Dimensions } from "react-native";
+import { View, Text, ScrollView, Dimensions, ActivityIndicator } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Svg, { Circle, Line, Path } from "react-native-svg";
 import { LinearGradient } from "expo-linear-gradient";
@@ -195,6 +195,11 @@ export default function Insights() {
         >
           {today}
         </Text>
+        <ActivityIndicator
+          color="#22c55e"
+          size="small"
+          style={{ marginTop: 60, alignSelf: "center" }}
+        />
       </ScrollView>
     );
   }

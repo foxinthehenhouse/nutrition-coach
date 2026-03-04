@@ -71,7 +71,7 @@ export function InputBar({
           backgroundColor: "transparent",
           borderWidth: 1,
           borderColor: focused ? "rgba(168,237,234,0.3)" : colors.border,
-          borderRadius: 20,
+          borderRadius: 14,
           padding: 18,
         }}
       >

@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Redirect } from "expo-router";
-import { View, ActivityIndicator } from "react-native";
+import { View, Text, ActivityIndicator } from "react-native";
 import { supabase } from "../lib/supabase";
-import { colors } from "../lib/theme";
+import { colors, fontFamily } from "../lib/theme";
 
 export default function Index() {
   const [session, setSession] = useState<unknown>(null);
@@ -25,7 +25,24 @@ export default function Index() {
 
   if (loading) {
     return (
-      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: colors.bg }}>
+      <View
+        style={{
+          flex: 1,
+          justifyContent: "center",
+          alignItems: "center",
+          backgroundColor: colors.bg,
+        }}
+      >
+        <Text
+          style={{
+            fontFamily: fontFamily.bold,
+            fontSize: 18,
+            color: colors.textPrimary,
+            marginBottom: 24,
+          }}
+        >
+          moment
+        </Text>
         <ActivityIndicator size="large" color={colors.green} />
       </View>
     );

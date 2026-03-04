@@ -289,7 +289,10 @@ export default function Profile() {
             connected
           </Text>
         ) : (
-          <Pressable onPress={() => router.push("/(onboarding)/whoop")}>
+          <Pressable
+            onPress={() => router.push("/(onboarding)/whoop")}
+            style={{ minHeight: 44, justifyContent: "center", paddingVertical: 10 }}
+          >
             <Text
               style={{
                 fontFamily: fontFamily.regular,
@@ -331,19 +334,27 @@ export default function Profile() {
         style={{
           fontFamily: fontFamily.regular,
           fontSize: 11,
-          color: "#1e1e1e",
+          color: "#444444",
           marginTop: 6,
         }}
       >
         linked to your nutrition coach
       </Text>
 
-      <Pressable onPress={handleSignOut} style={{ marginTop: 60 }}>
+      <Pressable
+        onPress={handleSignOut}
+        style={{
+          marginTop: 60,
+          minHeight: 44,
+          justifyContent: "center",
+          paddingVertical: 12,
+        }}
+      >
         <Text
           style={{
             fontFamily: fontFamily.regular,
             fontSize: 14,
-            color: "#222222",
+            color: "#444444",
             textAlign: "center",
           }}
         >

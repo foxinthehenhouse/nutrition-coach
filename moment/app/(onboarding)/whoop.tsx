@@ -193,13 +193,19 @@ export default function WhoopConnect() {
 
           <Pressable
             onPress={handleSkip}
-            style={{ marginTop: 16, alignSelf: "center" }}
+            style={{
+              marginTop: 16,
+              alignSelf: "center",
+              minHeight: 44,
+              justifyContent: "center",
+              paddingHorizontal: 16,
+            }}
           >
             <Text
               style={{
                 fontFamily: fontFamily.regular,
                 fontSize: 13,
-                color: "#2a2a2a",
+                color: "#444444",
                 textAlign: "center",
               }}
             >
@@ -217,7 +223,7 @@ export default function WhoopConnect() {
           right: 0,
           fontFamily: fontFamily.regular,
           fontSize: 11,
-          color: "#1e1e1e",
+          color: "#444444",
           textAlign: "center",
         }}
       >

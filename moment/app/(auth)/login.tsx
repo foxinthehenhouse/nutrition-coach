@@ -231,7 +231,7 @@ export default function AuthLogin() {
           style={{
             fontFamily: fontFamily.regular,
             fontSize: 12,
-            color: "#1e1e1e",
+            color: "#444444",
             textAlign: "center",
             marginTop: 16,
           }}
