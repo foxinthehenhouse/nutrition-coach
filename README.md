@@ -148,11 +148,12 @@ Set up these scheduled HTTP requests in n8n (all times AEDT → UTC):
 
 | Time (AEDT) | UTC | Endpoint | Method |
 |-------------|-----|----------|--------|
-| 6:00 AM | 7:00 PM (prev day) | `/checkin/morning` | POST |
 | 12:00 PM | 1:00 AM | `/checkin/midday` | POST |
 | 6:00 PM | 7:00 AM | `/checkin/evening` | POST |
 | 9:00 PM | 10:00 AM | `/checkin/night` | POST |
-| Every 5–15 min | — | `/sync/whoop` | GET |
+| Every 5-15 min | - | `/sync/whoop` | GET |
+
+Morning planning is triggered automatically by the `recovery.updated` WHOOP webhook (5-10am local). No cron needed.
 
 For real-time activity-driven updates, ensure WHOOP webhooks are registered (workout.updated, recovery.updated, sleep.updated). Workouts trigger instant post-workout meal advice.
 Recovery and sleep updates also trigger proactive behavior nudges (with cooldown throttling).
@@ -164,7 +165,7 @@ Monday 9am AEDT pattern analysis is triggered automatically by the night summary
 Run `migration.sql` to create all tables. The schema includes:
 
 - **settings** — key/value configuration
-- **food_log** — daily food entries with full macros (incl. fiber, sodium, sugar)
+- **food_log** — daily food entries with full macros, micronutrients (iron, calcium, potassium, vitamin D, magnesium, zinc, B12), and per-ingredient component breakdowns
 - **whoop_cache** — cached WHOOP biometric data per day (incl. workout details)
 - **conversation_log** — SMS conversation history with flow tracking and source (text/voice)
 - **whoop_tokens** — OAuth2 tokens for WHOOP API
@@ -181,6 +182,25 @@ Run a one-time backfill (example: 180 days, 7-day chunks):
 curl -X POST "https://your-app.up.railway.app/sync/whoop/backfill?days=180&chunk_days=7" \
   -H "X-Admin-Token: $SYNC_ADMIN_TOKEN"
 ```
+
+## Configurable Settings
+
+Set these in the `settings` table (key/value):
+
+| Key | Values | Description |
+|-----|--------|-------------|
+| `timezone` | IANA timezone (e.g. `Australia/Sydney`) | User-local day boundary for pacing |
+| `tone` | `calm_professional`, `friendly`, `direct`, `coach` | Controls the coaching communication style |
+| `goal_mode` | `maintenance`, `recomposition` | Calorie target adjustment mode |
+| `dietary_preferences` | free text | Dietary restrictions or preferences |
+
+## Repeat Meal Suggestions
+
+At check-in points, the coach proactively suggests re-logging a meal from the previous day if the same meal type has not been logged yet today. Portion suggestions are adjusted based on current vs previous day activity levels.
+
+## Micronutrient Tracking
+
+The coach tracks and flags deficiencies in iron, calcium, potassium, vitamin D, magnesium, zinc, and B12, which are critical for testosterone and hematocrit support.
 
 Operational validation checklist:
 - `GET /sync/whoop` returns `status=synced` and current-day data

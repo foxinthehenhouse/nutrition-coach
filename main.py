@@ -325,7 +325,7 @@ def set_conversation_state(flow: str, step: int = 0, context: dict | None = None
 
 def log_food(meal_data: dict):
     now = get_local_now()
-    get_supabase().table("food_log").insert({
+    row = {
         "date": now.date().isoformat(),
         "time": now.strftime("%H:%M:%S"),
         "meal_type": meal_data.get("meal_type", ""),
@@ -338,7 +338,13 @@ def log_food(meal_data: dict):
         "sodium_mg": meal_data.get("sodium_mg", 0),
         "sugar_g": meal_data.get("sugar_g", 0),
         "source": meal_data.get("source", "sms"),
-    }).execute()
+    }
+    if meal_data.get("components"):
+        row["components"] = json.dumps(meal_data["components"]) if not isinstance(meal_data["components"], str) else meal_data["components"]
+    for micro in ("iron_mg", "calcium_mg", "potassium_mg", "vitamin_d_mcg", "magnesium_mg", "zinc_mg", "b12_mcg"):
+        if meal_data.get(micro) is not None:
+            row[micro] = meal_data[micro]
+    get_supabase().table("food_log").insert(row).execute()
 
 
 def log_conversation(direction: str, message: str, flow: str | None = None, source: str | None = None):
@@ -916,36 +922,39 @@ async def get_whoop_token() -> str | None:
     return token_row["access_token"]
 
 
-async def refresh_whoop_token(refresh_token: str) -> str | None:
+async def refresh_whoop_token(refresh_token: str, max_retries: int = 3) -> str | None:
     if not refresh_token:
         logger.error("No refresh token available")
         return None
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                WHOOP_TOKEN_URL,
-                data={
-                    "grant_type": "refresh_token",
-                    "refresh_token": refresh_token,
-                    "client_id": WHOOP_CLIENT_ID,
-                    "client_secret": WHOOP_CLIENT_SECRET,
-                },
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        expires_at = datetime.fromtimestamp(
-            datetime.now(timezone.utc).timestamp() + data["expires_in"], tz=timezone.utc
-        ).isoformat()
-        token_row = {"id": 1, "access_token": data["access_token"], "expires_at": expires_at}
-        if data.get("refresh_token"):
-            token_row["refresh_token"] = data["refresh_token"]
-        get_supabase().table("whoop_tokens").upsert(token_row).execute()
-        logger.info("Whoop token refreshed successfully")
-        return data["access_token"]
-    except Exception as e:
-        logger.error(f"Failed to refresh Whoop token: {e}")
-        return None
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    WHOOP_TOKEN_URL,
+                    data={
+                        "grant_type": "refresh_token",
+                        "refresh_token": refresh_token,
+                        "client_id": WHOOP_CLIENT_ID,
+                        "client_secret": WHOOP_CLIENT_SECRET,
+                    },
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            expires_at = datetime.fromtimestamp(
+                datetime.now(timezone.utc).timestamp() + data["expires_in"], tz=timezone.utc
+            ).isoformat()
+            token_row = {"id": 1, "access_token": data["access_token"], "expires_at": expires_at}
+            if data.get("refresh_token"):
+                token_row["refresh_token"] = data["refresh_token"]
+            get_supabase().table("whoop_tokens").upsert(token_row).execute()
+            logger.info("Whoop token refreshed successfully")
+            return data["access_token"]
+        except Exception as e:
+            logger.error(f"Whoop token refresh attempt {attempt}/{max_retries} failed: {e}")
+            if attempt < max_retries:
+                await asyncio.sleep(2 ** attempt)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1458,6 +1467,74 @@ def get_targets(strain_score: float | None, settings: dict) -> dict:
 # Claude system prompt
 # ---------------------------------------------------------------------------
 
+TONE_PRESETS = {
+    "calm_professional": "Communicate in a calm, measured, professional tone. No slang.",
+    "friendly": "Communicate like a supportive friend. Casual but never sloppy.",
+    "direct": "Be concise and direct. Minimal pleasantries.",
+    "coach": "Communicate like a trusted coach. Firm but always encouraging.",
+}
+
+
+def _build_recent_history_section(settings: dict) -> str:
+    local_today = get_local_today(settings)
+    yesterday = local_today - timedelta(days=1)
+    yesterday_str = yesterday.isoformat()
+    try:
+        result = get_supabase().table("food_log").select("*").eq("date", yesterday_str).execute()
+        rows = result.data or []
+    except Exception:
+        rows = []
+    if not rows:
+        yesterday_summary = "No food logged yesterday."
+    else:
+        total_cal = sum(r.get("calories") or 0 for r in rows)
+        total_p = sum(float(r.get("protein_g") or 0) for r in rows)
+        meals = [r.get("description", "?") for r in rows if r.get("description")]
+        yesterday_summary = f"Yesterday: {total_cal} kcal, {round(total_p)}g protein. Meals: {'; '.join(meals[:6])}"
+    try:
+        week_start = (local_today - timedelta(days=7)).isoformat()
+        whoop_rows = (
+            get_supabase().table("whoop_cache").select("date,calories_burned_kcal,strain_score")
+            .gte("date", week_start).lte("date", local_today.isoformat()).execute()
+        ).data or []
+    except Exception:
+        whoop_rows = []
+    if whoop_rows:
+        burns = [float(r.get("calories_burned_kcal") or 0) for r in whoop_rows if r.get("calories_burned_kcal")]
+        avg_burn = round(sum(burns) / len(burns)) if burns else "N/A"
+        avg_strain_vals = [float(r.get("strain_score") or 0) for r in whoop_rows if r.get("strain_score")]
+        avg_strain = round(sum(avg_strain_vals) / len(avg_strain_vals), 1) if avg_strain_vals else "N/A"
+        week_summary = f"7-day avg burn: {avg_burn} kcal, avg strain: {avg_strain}"
+    else:
+        week_summary = "No WHOOP data for the past 7 days."
+    return f"{yesterday_summary}\n{week_summary}"
+
+
+def _build_repeat_meal_hints(settings: dict) -> str:
+    local_today = get_local_today(settings)
+    yesterday = local_today - timedelta(days=1)
+    try:
+        result = (
+            get_supabase().table("food_log").select("meal_type,description,calories,protein_g")
+            .eq("date", yesterday.isoformat()).execute()
+        )
+        rows = result.data or []
+    except Exception:
+        rows = []
+    if not rows:
+        return ""
+    hints = []
+    for r in rows:
+        mt = r.get("meal_type", "meal")
+        desc = r.get("description", "")
+        cal = r.get("calories", 0)
+        if desc:
+            hints.append(f"{mt}: {desc} ({cal} kcal)")
+    if not hints:
+        return ""
+    return "Yesterday's meals (for repeat suggestions): " + "; ".join(hints[:5])
+
+
 def build_system_prompt(
     settings: dict,
     whoop_data: dict | None,
@@ -1478,6 +1555,9 @@ def build_system_prompt(
     local_date = daily_metrics["local_date"]
     signals = daily_metrics["meal_signals"]
 
+    tone_key = settings.get("tone", "calm_professional")
+    tone_instruction = TONE_PRESETS.get(tone_key, TONE_PRESETS["calm_professional"])
+
     w = whoop_data or {}
     workout_type = w.get("workout_type", "none")
     workout_strain = w.get("workout_strain", "N/A")
@@ -1485,11 +1565,18 @@ def build_system_prompt(
 
     food_lines = []
     for r in food_rows:
+        components = r.get("components")
+        comp_str = ""
+        if components and isinstance(components, list):
+            comp_parts = [f"  {c.get('food', '?')} ({c.get('amount_g', '?')}g): {c.get('calories', 0)} kcal, "
+                          f"{c.get('protein_g', 0)}g P, {c.get('carbs_g', 0)}g C, {c.get('fat_g', 0)}g F"
+                          for c in components]
+            comp_str = "\n" + "\n".join(comp_parts)
         food_lines.append(
             f"- {r.get('time', '??:??')} [{r.get('meal_type', '')}] {r.get('description', 'unknown')}: "
             f"{r.get('calories', 0)} kcal, {r.get('protein_g', 0)}g P, "
             f"{r.get('carbs_g', 0)}g C, {r.get('fat_g', 0)}g F, "
-            f"{r.get('fiber_g', 0)}g fiber"
+            f"{r.get('fiber_g', 0)}g fiber{comp_str}"
         )
     food_summary = "\n".join(food_lines) if food_lines else "No food logged yet today."
 
@@ -1500,35 +1587,56 @@ def build_system_prompt(
 
     mem_text = "\n".join(m.get("memory", str(m)) for m in memories) if memories else "No memories yet."
 
-    return f"""You are Kyle's personal nutrition coach — a supportive, knowledgeable guide who provides \
+    recent_history = _build_recent_history_section(settings)
+    repeat_hints = _build_repeat_meal_hints(settings)
+
+    return f"""You are Kyle's personal nutrition coach, a supportive and knowledgeable guide who provides \
 helpful advice on food, training nutrition, and habits. You have PhD-level expertise in performance \
-nutrition and exercise physiology, but you communicate like a warm, direct friend — no fluff. \
+nutrition and exercise physiology, but you communicate warmly and directly, without fluff. \
 You maintain context across the conversation and react appropriately to ANY prompt: meal logging, \
 questions, follow-ups, setbacks, wins, cravings, travel, eating out, or "I'm struggling." \
-Always be encouraging and practical. If something isn't clear, ask. If he shares a challenge, \
+Always be encouraging and practical. If something is not clear, ask. If he shares a challenge, \
 offer specific, actionable support.
+
+TONE: {tone_instruction}
+Never make Kyle feel bad about food choices. Frame gaps as opportunities, not failures. \
+Avoid cliche fitness or gym-bro language (e.g., "gains", "crushing it", "beast mode", "let's go"). \
+Be positive and reassuring without being overly cheerful or performative.
+
+FORMATTING RULES:
+- Never use em dashes (the long dash character). Use commas, periods, or semicolons instead.
+- Use plain text only. No asterisks, markdown, or formatting (SMS does not support it).
+- When logging a meal, always break down the response by individual ingredient with calories and macros for each.
 
 KYLE'S BASELINE PROFILE:
 BMR: ~1,700 kcal/day
 90-day average burn: ~2,375 kcal/day
 Goal mode: {goal_mode}
 Dietary preferences: {dietary_prefs}
-Health priorities: testosterone and hematocrit support — under-fueling is a bigger risk \
-than over-fueling for Kyle specifically
+Health priorities: testosterone and hematocrit support. Under-fueling is a bigger risk \
+than over-fueling for Kyle specifically.
 
 STRAIN-BASED DAILY TARGETS:
-Low strain (Strain ≤7): 2,200 kcal | Protein 150g | Carbs 200g | Fat 70g
-Normal (Strain 8–12): 2,500 kcal | Protein 160g | Carbs 230g | Fat 75g
-High strain (Strain ≥13): 2,900 kcal | Protein 175g | Carbs 280g | Fat 80g
-Monster day (Strain 17+): 3,100 kcal — distribute surplus over next 2 days
-If goal_mode = recomposition: reduce all calorie targets by 175 kcal
+Low strain (Strain <=7): 2,200 kcal | Protein 150g | Carbs 200g | Fat 70g
+Normal (Strain 8-12): 2,500 kcal | Protein 160g | Carbs 230g | Fat 75g
+High strain (Strain >=13): 2,900 kcal | Protein 175g | Carbs 280g | Fat 80g
+Monster day (Strain 17+): 3,100 kcal. Distribute surplus over next 2 days.
+If goal_mode = recomposition: reduce all calorie targets by 175 kcal.
 
 TODAY'S WHOOP DATA:
 Date: {local_date}
 Strain: {w.get('strain_score', 'N/A')} | Calories burned so far: {w.get('calories_burned_kcal', 'N/A')} kcal
 Recovery: {w.get('recovery_score', 'N/A')}% | HRV: {w.get('hrv_rmssd', 'N/A')}ms | RHR: {w.get('resting_heart_rate', 'N/A')}bpm
 Sleep performance: {w.get('sleep_performance_pct', 'N/A')}%
-Latest workout: {workout_type} — {workout_strain} strain, {workout_kcal} kcal
+Latest workout: {workout_type}, {workout_strain} strain, {workout_kcal} kcal
+
+ACTIVITY-SPECIFIC NUTRITION GUIDANCE:
+When workout type is known, adjust recommendations using your exercise physiology expertise:
+- Strength/weightlifting/powerlifting: prioritize protein (0.4-0.5g/kg in post-workout meal), moderate carbs for glycogen replenishment.
+- Running/cycling/cardio: prioritize carbs (1.0-1.2g/kg post-workout), maintain protein for recovery.
+- HIIT/CrossFit/mixed modality: balanced protein and carbs, higher total calorie allocation.
+- Yoga/mobility/light activity: no special macro adjustment needed.
+These are guidelines. Use your expertise to calibrate based on intensity, duration, and Kyle's current state.
 
 TODAY'S NUTRITION:
 Meal plan for today: {meal_plan_str}
@@ -1541,19 +1649,30 @@ Meal logging signals: missed_breakfast={signals['missed_breakfast']}, missed_lun
 
 {food_summary}
 
+RECENT HISTORY:
+{recent_history}
+{repeat_hints}
+
 RELEVANT MEMORIES:
 {mem_text}
 
 INSTRUCTIONS:
-- Always think in terms of macro AND micronutrients — flag sodium, fiber, sugar when relevant
-- When suggesting food changes, be specific and simple: "add 30g of almonds" not "eat more healthy fats"
-- Reference Kyle's logged foods and preferences when making suggestions
-- When you detect a recurring issue (e.g. low protein at lunch 3 days running), name it directly
+- Track and flag micronutrient status: iron, calcium, potassium, vitamin D, magnesium, zinc, and B12 are critical for Kyle's testosterone and hematocrit priorities. Estimate values and flag likely deficiencies.
+- When suggesting food changes, be specific and simple: "add 30g of almonds" not "eat more healthy fats".
+- All meal suggestions must reference Kyle's known food preferences and past meals from memories. If suggesting something new, acknowledge it.
+- When checking in, proactively suggest re-logging a previous similar meal if that meal type has not been logged today. Adjust portions based on today's activity level compared to when the meal was originally eaten.
+- When you detect a recurring issue (e.g. low protein at lunch 3 days running), name it directly.
+- When logging a meal, ALWAYS include a per-ingredient breakdown in your response showing each food item with its individual calories and macros.
 - Append structured meal data after any food log in this exact format, on its own line:
   <meal>{{"meal_type": "lunch", "calories": 650, "protein_g": 45, "carbs_g": 60, "fat_g": 18, \
-"fiber_g": 8, "sodium_mg": 420, "sugar_g": 12, "description": "chicken rice bowl with veg"}}</meal>
-- Never make the <meal> tag visible in your response to the user — it's parsed silently
-- Use plain text only — no asterisks, markdown, or formatting (SMS doesn't support it)"""
+"fiber_g": 8, "sodium_mg": 420, "sugar_g": 12, \
+"iron_mg": 3.2, "calcium_mg": 80, "potassium_mg": 450, "vitamin_d_mcg": 0, \
+"magnesium_mg": 55, "zinc_mg": 4.1, "b12_mcg": 1.2, \
+"components": [{{"food": "chicken breast", "amount_g": 150, "calories": 250, "protein_g": 45, "carbs_g": 0, "fat_g": 5}}, \
+{{"food": "white rice", "amount_g": 200, "calories": 260, "protein_g": 5, "carbs_g": 58, "fat_g": 1}}], \
+"description": "chicken rice bowl with veg"}}</meal>
+- Never make the <meal> tag visible in your response to the user. It is parsed silently.
+- If Kyle asks about what he ate yesterday, previous days, or his typical calorie burn patterns, use the RECENT HISTORY section above to answer accurately."""
 
 
 # ---------------------------------------------------------------------------
@@ -1603,7 +1722,8 @@ def build_context_and_call(user_message: str, extra_mem_query: str | None = None
     whoop_data = get_today_whoop_cache()
     daily_plan = get_today_daily_plan()
     daily_metrics = build_daily_metrics(settings, food_rows, food_totals, whoop_data)
-    query = extra_mem_query or user_message
+    base_query = "food preferences meal history calorie patterns"
+    query = f"{base_query} {extra_mem_query or user_message}"
     memories = mem0_search(query)
     system_prompt = build_system_prompt(
         settings, whoop_data, food_rows, food_totals, memories, daily_plan, daily_metrics=daily_metrics
@@ -1795,6 +1915,10 @@ def analyze_patterns(period: str = "weekly") -> dict:
 
 async def handle_morning_planning(step: int, context: dict, user_message: str = "") -> None:
     if step == 0:
+        existing_plan = get_today_daily_plan()
+        if existing_plan and existing_plan.get("plan_confirmed"):
+            logger.info("Morning plan already confirmed for today, skipping")
+            return
         asyncio.create_task(_sync_whoop_background())
         memories = mem0_search("training schedule preferences typical morning routine")
         settings = get_settings()
@@ -1934,8 +2058,8 @@ async def handle_morning_planning(step: int, context: dict, user_message: str = 
 
 
 async def handle_midday_checkin() -> str:
-    asyncio.create_task(_sync_whoop_background())
-    memories = mem0_search("lunch preferences")
+    await sync_whoop_today()
+    memories = mem0_search("lunch preferences typical lunch breakfast habits")
     settings = get_settings()
     food_rows, food_totals = get_today_food_log()
     whoop_data = get_today_whoop_cache()
@@ -1962,8 +2086,8 @@ async def handle_midday_checkin() -> str:
 
 
 async def handle_evening_checkin() -> str:
-    asyncio.create_task(_sync_whoop_background())
-    memories = mem0_search("dinner preferences evening eating patterns")
+    await sync_whoop_today()
+    memories = mem0_search("dinner preferences evening eating patterns typical dinner")
     settings = get_settings()
     food_rows, food_totals = get_today_food_log()
     whoop_data = get_today_whoop_cache()
@@ -2020,8 +2144,8 @@ async def handle_post_workout(workout_data: dict | None = None) -> str:
 
 
 async def handle_night_summary() -> str:
-    asyncio.create_task(_sync_whoop_background())
-    memories = mem0_search("weekly_pattern monthly_pattern")
+    await sync_whoop_today()
+    memories = mem0_search("weekly_pattern monthly_pattern food preferences calorie patterns")
     settings = get_settings()
     food_rows, food_totals = get_today_food_log()
     whoop_data = get_today_whoop_cache()
@@ -2203,14 +2327,47 @@ async def process_sms_webhook(
         context = state.get("context") or {}
 
         if flow == "morning_planning" and step > 0:
-            await handle_morning_planning(step, context, user_message=claude_input)
-            mem0_add([{"role": "user", "content": incoming_message}])
-            return
+            last_updated = state.get("last_updated")
+            stale = False
+            if last_updated:
+                try:
+                    lu = datetime.fromisoformat(str(last_updated).replace("Z", "+00:00"))
+                    if lu.tzinfo is None:
+                        lu = lu.replace(tzinfo=timezone.utc)
+                    stale = (datetime.now(timezone.utc) - lu).total_seconds() > 7200
+                except (ValueError, TypeError):
+                    pass
+            if stale:
+                logger.info("Morning planning state stale (>2h), resetting to free_chat")
+                set_conversation_state("free_chat", step=0)
+            else:
+                food_keywords = ["i had", "i ate", "i just had", "just ate", "log ", "for breakfast",
+                                 "for lunch", "for dinner", "for snack", "smoothie", "protein shake",
+                                 "oats", "eggs", "chicken", "rice", "salad", "coffee"]
+                msg_lower = claude_input.lower().strip()
+                is_food_log = any(kw in msg_lower for kw in food_keywords)
+                if not is_food_log:
+                    await handle_morning_planning(step, context, user_message=claude_input)
+                    mem0_add([{"role": "user", "content": incoming_message}])
+                    return
 
         asyncio.create_task(_sync_whoop_background())
 
-        claude_response = build_context_and_call(claude_input)
-        clean_message = process_and_send(claude_response, from_number, flow="free_chat")
+        last_err = None
+        for _attempt in range(2):
+            try:
+                claude_response = build_context_and_call(claude_input)
+                clean_message = process_and_send(claude_response, from_number, flow="free_chat")
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                logger.warning(f"Claude/send attempt {_attempt + 1} failed: {e}")
+                if _attempt == 0:
+                    await asyncio.sleep(1)
+
+        if last_err:
+            raise last_err
 
         try:
             log_conversation("inbound", log_msg, flow="free_chat", source=source)
@@ -2225,8 +2382,8 @@ async def process_sms_webhook(
         logger.error(f"SMS processing error: {type(e).__name__}: {e}", exc_info=True)
         try:
             send_sms(to=from_number, body=f"Something went wrong ({type(e).__name__}). Please try again.")
-        except Exception:
-            pass
+        except Exception as sms_err:
+            logger.critical(f"TOTAL FAILURE: could not send error SMS to {from_number}: {sms_err}")
 
 
 def _event_nudge_allowed(event_type: str, settings: dict, cooldown_minutes: int = 90) -> bool:
@@ -2320,7 +2477,8 @@ async def process_whoop_webhook(payload: dict):
         if event_type == "recovery.updated":
             await sync_whoop_today()
             hour = get_local_now(settings).hour
-            if 5 <= hour <= 10:
+            existing_plan = get_today_daily_plan()
+            if 5 <= hour <= 10 and not (existing_plan and existing_plan.get("plan_confirmed")):
                 await handle_morning_planning(0, {})
             if _event_nudge_allowed(event_type, settings, cooldown_minutes=120):
                 await handle_recovery_update_nudge()
@@ -2659,7 +2817,8 @@ async def auth_whoop_callback(
 async def sync_whoop():
     data = await sync_whoop_today()
     if not data:
-        return JSONResponse(status_code=401, content={"error": "No valid Whoop token"})
+        logger.warning("WHOOP sync returned empty; token may need re-auth at /auth/whoop")
+        return {"status": "degraded", "error": "No valid Whoop token", "data": {}}
     return {"status": "synced", "data": data}
 
 
