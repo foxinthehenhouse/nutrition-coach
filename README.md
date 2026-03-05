@@ -142,21 +142,21 @@ In the WHOOP Developer Dashboard, register your webhook:
 - **Model version**: v2
 - **Event types**: `workout.updated`, `recovery.updated`, `sleep.updated`
 
-## n8n Schedule Triggers
+## n8n Schedule Triggers (Check-ins Only)
 
-Set up these scheduled HTTP requests in n8n (all times AEDT → UTC):
+Set up these three scheduled HTTP requests in n8n (all times AEDT to UTC). Do **not** poll `/sync/whoop` on a cron; WHOOP data is synced only at these check-ins and when webhooks fire.
 
 | Time (AEDT) | UTC | Endpoint | Method |
 |-------------|-----|----------|--------|
 | 12:00 PM | 1:00 AM | `/checkin/midday` | POST |
 | 6:00 PM | 7:00 AM | `/checkin/evening` | POST |
 | 9:00 PM | 10:00 AM | `/checkin/night` | POST |
-| Every 5-15 min | - | `/sync/whoop` | GET |
 
 Morning planning is triggered automatically by the `recovery.updated` WHOOP webhook (5-10am local). No cron needed.
 
-For real-time activity-driven updates, ensure WHOOP webhooks are registered (workout.updated, recovery.updated, sleep.updated). Workouts trigger instant post-workout meal advice.
-Recovery and sleep updates also trigger proactive behavior nudges (with cooldown throttling).
+WHOOP API is called only: (1) when a webhook fires (recovery.updated, workout.updated, sleep.updated), and (2) at each of the three check-ins above. This avoids repeated token refresh attempts and duplicate "no workout synced" messages.
+
+For real-time activity-driven updates, ensure WHOOP webhooks are registered (workout.updated, recovery.updated, sleep.updated). Workouts trigger instant post-workout meal advice only when the workout is scored; recovery and sleep updates trigger proactive nudges (with cooldown throttling).
 
 Monday 9am AEDT pattern analysis is triggered automatically by the night summary flow.
 

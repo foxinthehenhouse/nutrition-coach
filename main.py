@@ -900,7 +900,12 @@ def build_daily_metrics(
 # WHOOP token management
 # ---------------------------------------------------------------------------
 
+_last_whoop_token_alert_at: datetime | None = None
+WHOOP_TOKEN_ALERT_COOLDOWN_HOURS = 24
+
+
 async def get_whoop_token() -> str | None:
+    global _last_whoop_token_alert_at
     result = get_supabase().table("whoop_tokens").select("*").eq("id", 1).execute()
     if not result.data:
         logger.error("No Whoop tokens found in database")
@@ -913,10 +918,17 @@ async def get_whoop_token() -> str | None:
             logger.info("Whoop token expiring soon, refreshing...")
             new_token = await refresh_whoop_token(token_row.get("refresh_token"))
             if not new_token:
-                try:
-                    send_sms(OWNER_PHONE_NUMBER, "⚠️ WHOOP token refresh failed. Re-auth needed at /auth/whoop")
-                except Exception:
-                    pass
+                now = datetime.now(timezone.utc)
+                should_alert = (
+                    _last_whoop_token_alert_at is None
+                    or (now - _last_whoop_token_alert_at).total_seconds() > WHOOP_TOKEN_ALERT_COOLDOWN_HOURS * 3600
+                )
+                if should_alert:
+                    try:
+                        send_sms(OWNER_PHONE_NUMBER, "WHOOP token refresh failed. Re-auth at /auth/whoop")
+                        _last_whoop_token_alert_at = now
+                    except Exception:
+                        pass
                 return None
             return new_token
     return token_row["access_token"]
@@ -1179,8 +1191,6 @@ async def handle_image_entry(image_data: dict, from_number: str):
     if not image_data or not image_data.get("base64") or not image_data.get("content_type"):
         raise ValueError("Invalid image data")
 
-    asyncio.create_task(_sync_whoop_background())
-
     today = get_local_today()
     try:
         whoop = get_whoop_cache(today)
@@ -1406,7 +1416,6 @@ async def process_message(
             "so interpret it generously — meal descriptions should be parsed as full meal entries.] "
             + incoming_message
         )
-    asyncio.create_task(_sync_whoop_background())
     claude_response = build_context_and_call(claude_input)
     process_and_send(claude_response, from_number, flow="free_chat")
     log_to_conversation(incoming_message, claude_response, source=input_source, flow="free_chat")
@@ -1934,7 +1943,6 @@ async def handle_morning_planning(step: int, context: dict, user_message: str = 
         if existing_plan and existing_plan.get("plan_confirmed"):
             logger.info("Morning plan already confirmed for today, skipping")
             return
-        asyncio.create_task(_sync_whoop_background())
         memories = mem0_search("training schedule preferences typical morning routine")
         settings = get_settings()
         whoop_data = get_today_whoop_cache()
@@ -2366,8 +2374,6 @@ async def process_sms_webhook(
                     mem0_add([{"role": "user", "content": incoming_message}])
                     return
 
-        asyncio.create_task(_sync_whoop_background())
-
         last_err = None
         for _attempt in range(2):
             try:
@@ -2510,8 +2516,7 @@ async def process_whoop_webhook(payload: dict):
                 }
                 if _event_nudge_allowed(event_type, settings, cooldown_minutes=75):
                     await handle_post_workout(workout_info)
-            elif _event_nudge_allowed(event_type, settings, cooldown_minutes=75):
-                await handle_post_workout()
+            # Do not send a post-workout nudge when workout is not yet scored or missing; avoids "no workout synced" confusion
 
         elif event_type == "sleep.updated":
             await sync_whoop_today()
