@@ -1,4 +1,5 @@
 import "../global.css";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { GluestackUIProvider } from "@gluestack-ui/themed";
 import { config } from "@gluestack-ui/config";
 import { Stack } from "expo-router";
@@ -12,13 +13,15 @@ export default function RootLayout() {
   }
 
   return (
-    <GluestackUIProvider config={config}>
-      <Stack
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <GluestackUIProvider config={config}>
+        <Stack
         screenOptions={{
           headerShown: false,
           contentStyle: { backgroundColor: "#080808" },
         }}
-      />
-    </GluestackUIProvider>
+        />
+      </GluestackUIProvider>
+    </GestureHandlerRootView>
   );
 }

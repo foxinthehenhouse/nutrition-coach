@@ -9,7 +9,8 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { supabase } from "../../lib/supabase";
-import { deleteFoodLogEntry } from "../../lib/api";
+import { deleteFoodLogEntry, logFood } from "../../lib/api";
+import { SwipeableRow } from "../../components/ui/SwipeableRow";
 import { colors, fontFamily } from "../../lib/theme";
 
 interface FoodRow {
@@ -258,63 +259,90 @@ export default function Log() {
                 </Pressable>
               </View>
             )}
-          <View
-            style={{
-              flexDirection: "row",
-              justifyContent: "space-between",
-              alignItems: "flex-start",
-            }}
-          >
-            <View style={{ flex: 1, marginRight: 12 }}>
-              <Text
-                numberOfLines={2}
-                style={{
-                  fontFamily: fontFamily.regular,
-                  fontSize: 15,
-                  color: colors.textPrimary,
-                }}
-              >
-                {item.description}
-              </Text>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4 }}>
-                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentGreen }} />
-                <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
-                  {Math.round(item.protein_g ?? 0)}g
-                </Text>
-                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentBlue }} />
-                <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
-                  {Math.round(item.carbs_g ?? 0)}g
-                </Text>
-                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentOrange }} />
-                <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
-                  {Math.round(item.fat_g ?? 0)}g
-                </Text>
-                <View style={{ flex: 1 }} />
-                <Text style={{ fontFamily: fontFamily.regular, fontSize: 12, color: colors.textTertiary }}>
-                  {item.time?.slice(0, 5) ?? ""}
-                </Text>
+            <SwipeableRow
+              onDelete={() => {
+                Alert.alert("Delete entry", "Remove this meal from your log?", [
+                  { text: "Cancel", style: "cancel" },
+                  { text: "Delete", style: "destructive", onPress: async () => {
+                    try {
+                      await deleteFoodLogEntry(item.id);
+                      load();
+                    } catch (e) {
+                      Alert.alert("Error", "Could not remove entry.");
+                    }
+                  } },
+                ]);
+              }}
+              onRepeat={async () => {
+                try {
+                  const desc = (item.description ?? "").trim();
+                  if (desc) await logFood(desc);
+                  load();
+                } catch (e) {
+                  Alert.alert("Error", "Could not log again.");
+                }
+              }}
+            >
+              <View style={{ backgroundColor: colors.bg }}>
+                <View
+                  style={{
+                    flexDirection: "row",
+                    justifyContent: "space-between",
+                    alignItems: "flex-start",
+                  }}
+                >
+                  <View style={{ flex: 1, marginRight: 12 }}>
+                    <Text
+                      numberOfLines={2}
+                      style={{
+                        fontFamily: fontFamily.regular,
+                        fontSize: 15,
+                        color: colors.textPrimary,
+                      }}
+                    >
+                      {item.description}
+                    </Text>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4 }}>
+                      <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentGreen }} />
+                      <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
+                        {Math.round(item.protein_g ?? 0)}g
+                      </Text>
+                      <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentBlue }} />
+                      <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
+                        {Math.round(item.carbs_g ?? 0)}g
+                      </Text>
+                      <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentOrange }} />
+                      <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
+                        {Math.round(item.fat_g ?? 0)}g
+                      </Text>
+                      <View style={{ flex: 1 }} />
+                      <Text style={{ fontFamily: fontFamily.regular, fontSize: 12, color: colors.textTertiary }}>
+                        {item.time?.slice(0, 5) ?? ""}
+                      </Text>
+                    </View>
+                  </View>
+                  <View style={{ alignItems: "flex-end" }}>
+                    <Text
+                      style={{
+                        fontFamily: fontFamily.bold,
+                        fontSize: 17,
+                        color: colors.textPrimary,
+                      }}
+                    >
+                      {item.calories ?? 0}
+                    </Text>
+                  </View>
+                </View>
+                <View
+                  style={{
+                    height: 1,
+                    backgroundColor: "rgba(255,255,255,0.06)",
+                    marginTop: 14,
+                  }}
+                />
               </View>
-            </View>
-            <View style={{ alignItems: "flex-end" }}>
-              <Text
-                style={{
-                  fontFamily: fontFamily.bold,
-                  fontSize: 17,
-                  color: colors.textPrimary,
-                }}
-              >
-                {item.calories ?? 0}
-              </Text>
-            </View>
+            </SwipeableRow>
           </View>
-          <View
-            style={{
-              height: 1,
-              backgroundColor: "rgba(255,255,255,0.06)",
-              marginTop: 14,
-            }}
-          />
-        </View>
         );
       }}
     />

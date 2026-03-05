@@ -20,12 +20,13 @@ import { Feather } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import { Audio } from "expo-av";
 import { supabase } from "../../lib/supabase";
-import { logFood } from "../../lib/api";
+import { logFood, deleteFoodLogEntry } from "../../lib/api";
 import { GlowRing } from "../../components/ui/GlowRing";
 import { InputBar } from "../../components/ui/InputBar";
 import { StatPill } from "../../components/ui/StatPill";
 import { ProgressBar } from "../../components/ui/ProgressBar";
 import { Toast } from "../../components/ui/Toast";
+import { SwipeableRow } from "../../components/ui/SwipeableRow";
 import { colors, fontFamily, recoveryColor, proteinBarColor, spacing, radius } from "../../lib/theme";
 
 const MEAL_CHIPS = [
@@ -605,66 +606,91 @@ export default function Home() {
     return "Log a meal to see your progress. Try: chicken breast with quinoa — est. 500 cal, 40g P";
   };
 
+  const handleDeleteEntry = async (id: string) => {
+    try {
+      await deleteFoodLogEntry(id);
+      const { data } = await supabase
+        .from("food_log")
+        .select("*")
+        .eq("date", todayStr)
+        .order("time", { ascending: true });
+      setFoodLog(data ?? []);
+    } catch (e) {
+      console.error("[moment] delete failed:", e);
+      Alert.alert("Could not delete", "Try again.");
+    }
+  };
+
   const renderFoodItem = ({ item }: { item: any }) => (
-    <View>
-      <View style={{ paddingHorizontal: spacing.contentPadding, paddingVertical: 8 }}>
-        <View
-          style={{
-            flexDirection: "row",
-            justifyContent: "space-between",
-            alignItems: "flex-start",
-          }}
-        >
-          <View style={{ flex: 1, marginRight: 16 }}>
+    <SwipeableRow
+      onDelete={() => {
+        Alert.alert("Delete entry", "Remove this meal from today?", [
+          { text: "Cancel", style: "cancel" },
+          { text: "Delete", style: "destructive", onPress: () => handleDeleteEntry(item.id) },
+        ]);
+      }}
+      onRepeat={() => handleRepeatMeal(item.description ?? "")}
+    >
+      <View>
+        <View style={{ paddingHorizontal: spacing.contentPadding, paddingVertical: 8, backgroundColor: colors.bg }}>
+          <View
+            style={{
+              flexDirection: "row",
+              justifyContent: "space-between",
+              alignItems: "flex-start",
+            }}
+          >
+            <View style={{ flex: 1, marginRight: 16 }}>
+              <Text
+                numberOfLines={1}
+                ellipsizeMode="tail"
+                style={{
+                  fontFamily: fontFamily.regular,
+                  fontSize: 15,
+                  color: colors.textPrimary,
+                }}
+              >
+                {item.description}
+              </Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4 }}>
+                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentGreen }} />
+                <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
+                  {Math.round(item.protein_g ?? 0)}g
+                </Text>
+                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentBlue }} />
+                <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
+                  {Math.round(item.carbs_g ?? 0)}g
+                </Text>
+                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentOrange }} />
+                <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
+                  {Math.round(item.fat_g ?? 0)}g
+                </Text>
+                <View style={{ flex: 1 }} />
+                <Text style={{ fontFamily: fontFamily.regular, fontSize: 12, color: colors.textTertiary }}>
+                  {item.time?.slice(0, 5) ?? ""}
+                </Text>
+              </View>
+            </View>
             <Text
-              numberOfLines={1}
-              ellipsizeMode="tail"
               style={{
-                fontFamily: fontFamily.regular,
-                fontSize: 15,
+                fontFamily: fontFamily.bold,
+                fontSize: 17,
                 color: colors.textPrimary,
               }}
             >
-              {item.description}
+              {item.calories ?? 0}
             </Text>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4 }}>
-              <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentGreen }} />
-              <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
-                {Math.round(item.protein_g ?? 0)}g
-              </Text>
-              <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentBlue }} />
-              <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
-                {Math.round(item.carbs_g ?? 0)}g
-              </Text>
-              <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentOrange }} />
-              <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
-                {Math.round(item.fat_g ?? 0)}g
-              </Text>
-              <View style={{ flex: 1 }} />
-              <Text style={{ fontFamily: fontFamily.regular, fontSize: 12, color: colors.textTertiary }}>
-                {item.time?.slice(0, 5) ?? ""}
-              </Text>
-            </View>
           </View>
-          <Text
-            style={{
-              fontFamily: fontFamily.bold,
-              fontSize: 17,
-              color: colors.textPrimary,
-            }}
-          >
-            {item.calories ?? 0}
-          </Text>
         </View>
+        <View
+          style={{
+            height: 1,
+            backgroundColor: "rgba(255,255,255,0.06)",
+            marginHorizontal: spacing.contentPadding,
+          }}
+        />
       </View>
-      <View
-        style={{
-          height: 1,
-          backgroundColor: "rgba(255,255,255,0.06)",
-          marginHorizontal: spacing.contentPadding,
-        }}
-      />
-    </View>
+    </SwipeableRow>
   );
 
   return (
