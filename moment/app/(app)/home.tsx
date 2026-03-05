@@ -24,16 +24,18 @@ import { logFood } from "../../lib/api";
 import { GlowRing } from "../../components/ui/GlowRing";
 import { InputBar } from "../../components/ui/InputBar";
 import { StatPill } from "../../components/ui/StatPill";
-import { colors, fontFamily, recoveryColor, spacing } from "../../lib/theme";
+import { ProgressBar } from "../../components/ui/ProgressBar";
+import { Toast } from "../../components/ui/Toast";
+import { colors, fontFamily, recoveryColor, proteinBarColor, spacing, radius } from "../../lib/theme";
 
-const QUICK_PILLS = [
+const MEAL_CHIPS = [
   "post-workout 🥩",
   "breakfast",
   "lunch",
   "dinner",
   "snack",
-  "coffee",
-];
+  "+ custom",
+] as const;
 
 function PulsingPlaceholder() {
   const opacity = useRef(new Animated.Value(0.15)).current;
@@ -108,32 +110,42 @@ export default function Home() {
   const [recording, setRecording] = useState<Audio.Recording | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [voiceLoading, setVoiceLoading] = useState(false);
+  const [selectedMealChip, setSelectedMealChip] = useState<string | null>(null);
+  const [frequentMeals, setFrequentMeals] = useState<{ description: string }[]>([]);
+  const [undoLogId, setUndoLogId] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [toastVisible, setToastVisible] = useState(false);
   const recordingRef = useRef<Audio.Recording | null>(null);
 
   const loadData = useCallback(async () => {
-    const [whoopRes, foodRes, planRes, userRes] = await Promise.all([
-      supabase
-        .from("whoop_cache")
-        .select("*")
-        .eq("date", todayStr)
-        .maybeSingle(),
-      supabase
-        .from("food_log")
-        .select("*")
-        .eq("date", todayStr)
-        .order("time", { ascending: true }),
-      supabase
-        .from("daily_plans")
-        .select("*")
-        .eq("date", todayStr)
-        .maybeSingle(),
+    const [whoopRes, foodRes, planRes, userRes, recentRes] = await Promise.all([
+      supabase.from("whoop_cache").select("*").eq("date", todayStr).maybeSingle(),
+      supabase.from("food_log").select("*").eq("date", todayStr).order("time", { ascending: true }),
+      supabase.from("daily_plans").select("*").eq("date", todayStr).maybeSingle(),
       supabase.auth.getUser(),
+      supabase.from("food_log").select("description").order("date", { ascending: false }).order("time", { ascending: false }).limit(100),
     ]);
 
     setWhoopData(whoopRes.data);
     setFoodLog(foodRes.data ?? []);
     setDailyPlan(planRes.data);
     setUserMeta(userRes.data?.user?.user_metadata ?? {});
+    const recent = (recentRes.data as { description: string }[] | null) ?? [];
+    const byDesc = new Map<string, { original: string; count: number }>();
+    for (const r of recent) {
+      const orig = (r.description ?? "").trim();
+      const key = orig.toLowerCase();
+      if (key) {
+        const existing = byDesc.get(key);
+        if (!existing) byDesc.set(key, { original: orig, count: 1 });
+        else existing.count += 1;
+      }
+    }
+    const top = Array.from(byDesc.values())
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5)
+      .map(({ original }) => ({ description: original }));
+    setFrequentMeals(top);
     setIsLoading(false);
   }, [todayStr]);
 
@@ -201,9 +213,35 @@ export default function Home() {
         .eq("date", todayStr)
         .order("time", { ascending: true });
       setFoodLog(data ?? []);
+      const last = (data ?? [])[(data ?? []).length - 1];
+      if (last) {
+        setToastMessage(`${last.calories ?? 0} cal logged ✓`);
+        setToastVisible(true);
+      }
     } catch (e) {
       setFoodLog((prev) => prev.filter((r) => r.id !== optimistic.id));
       console.error("[moment] send failed:", e);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const handleRepeatMeal = async (description: string) => {
+    if (sending) return;
+    setSending(true);
+    try {
+      await logFood(description);
+      const { data } = await supabase
+        .from("food_log")
+        .select("*")
+        .eq("date", todayStr)
+        .order("time", { ascending: true });
+      setFoodLog(data ?? []);
+      const last = (data ?? [])[(data ?? []).length - 1];
+      if (last?.id) setUndoLogId(last.id);
+      setTimeout(() => setUndoLogId(null), 500);
+    } catch (e) {
+      console.error("[moment] repeat failed:", e);
     } finally {
       setSending(false);
     }
@@ -471,101 +509,105 @@ export default function Home() {
     }
   };
 
-  const renderBiometricHeader = () => {
-    if (isLoading) {
-      return <PulsingPlaceholder />;
+  const getCoachingCopy = (): string => {
+    const score = whoopData?.recovery_score;
+    const strain = whoopData?.strain_score;
+    if (score != null && strain != null) {
+      if (score < 34) return `Easy day. Aim for ${calorieTarget} cal and ${proteinTarget}g protein to support recovery.`;
+      if (strain >= 13) return `Hard day ahead. Aim for ${calorieTarget} cal and ${proteinTarget}g protein to support tonight's recovery.`;
+      if (score > 67) return `Good day to push. Aim for ${calorieTarget} cal and ${proteinTarget}g protein.`;
+      return `Moderate intensity today. Aim for ${calorieTarget} cal and ${proteinTarget}g protein.`;
     }
+    if (strain != null && strain >= 13) return `Big day. Don't skip carbs. Aim for ${calorieTarget} cal and ${proteinTarget}g protein.`;
+    return `Aim for ${calorieTarget} cal and ${proteinTarget}g protein today.`;
+  };
 
+  const renderWhoopCard = () => {
+    if (isLoading) return <PulsingPlaceholder />;
     if (whoopData?.recovery_score != null) {
       const score = whoopData.recovery_score;
-      const insight =
-        score > 67
-          ? "good day to push."
-          : score >= 34
-            ? "moderate intensity today."
-            : "prioritise rest and recovery.";
-
       return (
-        <View>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 16 }}>
-            <GlowRing
-              size={52}
-              progress={score / 100}
-              color={recoveryColor(score)}
-              centerLabel=""
-            />
-            <View style={{ gap: 6 }}>
-              <View style={{ flexDirection: "row", gap: 6 }}>
-                <StatPill
-                  value={`${Math.round(score)}`}
-                  label="rec"
-                  color={recoveryColor(score)}
-                />
-                <StatPill
-                  value={
-                    whoopData.hrv_rmssd
-                      ? `${Math.round(whoopData.hrv_rmssd)}`
-                      : "–"
-                  }
-                  label="hrv"
-                />
-                <StatPill
-                  value={
-                    whoopData.strain_score
-                      ? whoopData.strain_score.toFixed(1)
-                      : "–"
-                  }
-                  label="strain"
-                />
-              </View>
+        <Pressable
+          onPress={() => router.push("/(onboarding)/whoop")}
+          style={{
+            backgroundColor: colors.surface,
+            borderRadius: radius.card,
+            padding: spacing.cardPaddingH,
+            marginHorizontal: spacing.contentPadding,
+            flexDirection: "row",
+            alignItems: "center",
+            borderWidth: 1,
+            borderColor: colors.borderSubtle,
+          }}
+        >
+          <GlowRing
+            size={40}
+            progress={score / 100}
+            color={colors.accentGold}
+            centerLabel=""
+          />
+          <View style={{ flex: 1, marginLeft: 12 }}>
+            <Text
+              style={{
+                fontFamily: fontFamily.regular,
+                fontSize: 15,
+                color: colors.textPrimary,
+              }}
+              numberOfLines={2}
+            >
+              {getCoachingCopy()}
+            </Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 10 }}>
+              <StatPill value={`${Math.round(score)}`} label="REC" color={recoveryColor(score)} />
+              <StatPill value={whoopData.hrv_rmssd ? `${Math.round(whoopData.hrv_rmssd)}` : "–"} label="HRV" />
+              <StatPill value={whoopData.strain_score ? whoopData.strain_score.toFixed(1) : "–"} label="STRAIN" />
             </View>
           </View>
-          <Text
-            style={{
-              fontFamily: fontFamily.regular,
-              fontSize: 12,
-              color: "#3a3a3a",
-              fontStyle: "italic",
-              marginTop: 8,
-            }}
-          >
-            {insight}
-          </Text>
-        </View>
+          <Feather name="chevron-right" size={16} color="rgba(255,255,255,0.3)" />
+        </Pressable>
       );
     }
-
     return (
       <Pressable
         onPress={() => router.push("/(onboarding)/whoop")}
-        style={{ paddingVertical: 12 }}
+        style={{
+          backgroundColor: colors.surface,
+          borderRadius: radius.card,
+          padding: spacing.cardPaddingH,
+          marginHorizontal: spacing.contentPadding,
+          flexDirection: "row",
+          alignItems: "center",
+          borderWidth: 1,
+          borderColor: colors.borderSubtle,
+        }}
       >
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <View
-            style={{
-              width: 5,
-              height: 5,
-              borderRadius: 999,
-              backgroundColor: "#f59e0b",
-            }}
-          />
-          <Text
-            style={{
-              fontFamily: fontFamily.regular,
-              fontSize: 13,
-              color: "#3a3a3a",
-            }}
-          >
-            connect WHOOP for adaptive targets
-          </Text>
-        </View>
+        <View style={{ width: 5, height: 5, borderRadius: 999, backgroundColor: colors.accentGold }} />
+        <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary, marginLeft: 8 }}>
+          Connect WHOOP for adaptive targets
+        </Text>
       </Pressable>
     );
   };
 
+  const calProgress = Math.min(totalCalories / calorieTarget, 1);
+  const proteinProgress = proteinTarget > 0 ? Math.min(totalProtein / proteinTarget, 1) : 0;
+  const remainingCal = Math.max(0, calorieTarget - totalCalories);
+  const remainingProtein = Math.max(0, proteinTarget - totalProtein);
+
+  const getEmptyStateSuggestion = (): string => {
+    const hour = new Date().getHours();
+    const strain = whoopData?.strain_score;
+    if (strain != null && strain >= 13 && (hour < 10 || hour >= 6)) {
+      return "Given your strain today, you need carbs and protein at breakfast. Try: oats + 2 eggs + banana — est. 520 cal, 28g P";
+    }
+    if (hour < 10) return "Start with protein and carbs. Try: oats + 2 eggs + banana — est. 520 cal, 28g P";
+    if (hour >= 18) return "Wind down with a balanced dinner. Try: grilled chicken + veg + rice — est. 600 cal, 45g P";
+    return "Log a meal to see your progress. Try: chicken breast with quinoa — est. 500 cal, 40g P";
+  };
+
   const renderFoodItem = ({ item }: { item: any }) => (
     <View>
-      <View style={{ paddingHorizontal: spacing.contentPadding, paddingVertical: 14 }}>
+      <View style={{ paddingHorizontal: spacing.contentPadding, paddingVertical: 8 }}>
         <View
           style={{
             flexDirection: "row",
@@ -575,112 +617,115 @@ export default function Home() {
         >
           <View style={{ flex: 1, marginRight: 16 }}>
             <Text
-              numberOfLines={3}
+              numberOfLines={1}
+              ellipsizeMode="tail"
               style={{
                 fontFamily: fontFamily.regular,
                 fontSize: 15,
-                color: "#f0f0f0",
+                color: colors.textPrimary,
               }}
             >
               {item.description}
             </Text>
-            <Text
-              style={{
-                fontFamily: fontFamily.regular,
-                fontSize: 12,
-                color: "#2a2a2a",
-                marginTop: 5,
-              }}
-            >
-              {`P${Math.round(item.protein_g ?? 0)}  C${Math.round(item.carbs_g ?? 0)}  F${Math.round(item.fat_g ?? 0)}`}
-            </Text>
-            {item.meal_type ? (
-              <View
-                style={{
-                  backgroundColor: "#0f0f0f",
-                  borderWidth: 1,
-                  borderColor: "#111111",
-                  borderRadius: 999,
-                  paddingHorizontal: 8,
-                  paddingVertical: 2,
-                  alignSelf: "flex-start",
-                  marginTop: 6,
-                }}
-              >
-                <Text
-                  style={{
-                    fontFamily: fontFamily.regular,
-                    fontSize: 11,
-                    color: "#282828",
-                  }}
-                >
-                  {item.meal_type}
-                </Text>
-              </View>
-            ) : null}
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4 }}>
+              <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentGreen }} />
+              <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
+                {Math.round(item.protein_g ?? 0)}g
+              </Text>
+              <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentBlue }} />
+              <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
+                {Math.round(item.carbs_g ?? 0)}g
+              </Text>
+              <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentOrange }} />
+              <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
+                {Math.round(item.fat_g ?? 0)}g
+              </Text>
+              <View style={{ flex: 1 }} />
+              <Text style={{ fontFamily: fontFamily.regular, fontSize: 12, color: colors.textTertiary }}>
+                {item.time?.slice(0, 5) ?? ""}
+              </Text>
+            </View>
           </View>
-          <View style={{ alignItems: "flex-end" }}>
-            <Text
-              style={{
-                fontFamily: fontFamily.bold,
-                fontSize: 16,
-                color: "#f0f0f0",
-              }}
-            >
-              {`${item.calories ?? 0}`}
-            </Text>
-            <Text
-              style={{
-                fontFamily: fontFamily.regular,
-                fontSize: 11,
-                color: "#282828",
-                marginTop: 3,
-              }}
-            >
-              {item.time?.slice(0, 5) ?? ""}
-            </Text>
-          </View>
+          <Text
+            style={{
+              fontFamily: fontFamily.bold,
+              fontSize: 17,
+              color: colors.textPrimary,
+            }}
+          >
+            {item.calories ?? 0}
+          </Text>
         </View>
       </View>
       <View
         style={{
           height: 1,
-          backgroundColor: "#111111",
+          backgroundColor: "rgba(255,255,255,0.06)",
           marginHorizontal: spacing.contentPadding,
         }}
       />
     </View>
   );
 
-  const calProgress = Math.min(totalCalories / calorieTarget, 1);
-  const ringColor =
-    totalCalories >= calorieTarget
-      ? "#a8edea"
-      : recoveryColor(Math.round(calProgress * 100));
-
   return (
-    <View style={{ flex: 1, backgroundColor: "#080808" }}>
-      {/* Zone A — Biometric Header */}
-      <View
-        style={{
-          paddingTop: insets.top + 12,
-          paddingHorizontal: spacing.contentPadding,
-          paddingBottom: 16,
-          borderBottomWidth: 1,
-          borderBottomColor: "#111111",
+    <View style={{ flex: 1, backgroundColor: colors.bg }}>
+      <Toast
+        visible={toastVisible}
+        message={toastMessage ?? ""}
+        onDismiss={() => {
+          setToastVisible(false);
+          setToastMessage(null);
         }}
-      >
-        {renderBiometricHeader()}
+      />
+      {/* WHOOP Coaching Card */}
+      <View style={{ paddingTop: insets.top + 12, paddingBottom: 16 }}>
+        {renderWhoopCard()}
       </View>
 
-      {/* Zone B — Input */}
-      <View
-        style={{
-          paddingHorizontal: spacing.contentPadding,
-          paddingTop: 16,
-          paddingBottom: 8,
-        }}
-      >
+      {/* Hero Progress */}
+      <View style={{ paddingHorizontal: spacing.contentPadding, marginBottom: 16 }}>
+        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 8 }}>
+          <View>
+            <Text style={{ fontFamily: fontFamily.bold, fontSize: 48, color: colors.textPrimary, letterSpacing: -0.5 }}>
+              {totalCalories}
+            </Text>
+            <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: "rgba(255,255,255,0.45)" }}>
+              calories
+            </Text>
+          </View>
+          <Text style={{ fontFamily: fontFamily.regular, fontSize: 15, color: colors.textSecondary }}>
+            {remainingCal} remaining of {calorieTarget}
+          </Text>
+        </View>
+        <View style={{ marginTop: 8 }}>
+          <ProgressBar
+            progress={calProgress}
+            color={colors.accentBlue}
+            accessibilityValue={{ text: `${totalCalories} of ${calorieTarget} calories, ${Math.round(calProgress * 100)} percent` }}
+          />
+        </View>
+        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end", marginTop: 16, marginBottom: 8 }}>
+          <View>
+            <Text style={{ fontFamily: fontFamily.bold, fontSize: 48, color: colors.textPrimary, letterSpacing: -0.5 }}>
+              {Math.round(totalProtein)}g
+            </Text>
+            <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: "rgba(255,255,255,0.45)" }}>
+              protein
+            </Text>
+          </View>
+          <Text style={{ fontFamily: fontFamily.regular, fontSize: 15, color: colors.textSecondary }}>
+            {Math.round(remainingProtein)}g remaining
+          </Text>
+        </View>
+        <ProgressBar
+          progress={proteinProgress}
+          color={proteinBarColor(proteinProgress)}
+          accessibilityValue={{ text: `${Math.round(totalProtein)} of ${proteinTarget}g protein, ${Math.round(proteinProgress * 100)} percent` }}
+        />
+      </View>
+
+      {/* Input */}
+      <View style={{ paddingHorizontal: spacing.contentPadding, paddingBottom: 8 }}>
         <InputBar
           value={input}
           onChangeText={setInput}
@@ -693,37 +738,40 @@ export default function Home() {
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
-          style={{ marginTop: 12 }}
+          style={{ marginTop: 8 }}
           contentContainerStyle={{ gap: 8, paddingRight: 4 }}
         >
-          {QUICK_PILLS.map((label) => (
-            <Pressable key={label} onPress={() => setInput(label)}>
-              <View
+          {MEAL_CHIPS.map((label) => {
+            const isActive = selectedMealChip === label;
+            return (
+              <Pressable
+                key={label}
+                onPress={() => setSelectedMealChip(isActive ? null : label)}
                 style={{
-                  backgroundColor: "#0f0f0f",
+                  backgroundColor: isActive ? colors.textPrimary : "rgba(255,255,255,0.07)",
                   borderWidth: 1,
-                  borderColor: "#1c1c1c",
-                  borderRadius: 999,
+                  borderColor: isActive ? colors.textPrimary : "rgba(255,255,255,0.1)",
+                  borderRadius: radius.pill,
                   paddingHorizontal: 14,
-                  paddingVertical: 7,
+                  paddingVertical: 8,
                 }}
               >
                 <Text
                   style={{
                     fontFamily: fontFamily.regular,
                     fontSize: 13,
-                    color: "#3a3a3a",
+                    color: isActive ? colors.bg : "rgba(255,255,255,0.6)",
                   }}
                 >
                   {label}
                 </Text>
-              </View>
-            </Pressable>
-          ))}
+              </Pressable>
+            );
+          })}
         </ScrollView>
       </View>
 
-      {/* Zone C — Food Log */}
+      {/* Repeat meals + Food Log */}
       <FlatList
         style={{ flex: 1 }}
         data={foodLog}
@@ -733,104 +781,82 @@ export default function Home() {
           paddingBottom: 16,
           flexGrow: 1,
         }}
-        ListEmptyComponent={
-          !isLoading ? (
-            <View style={{ flex: 1, paddingTop: 48, alignItems: "center" }}>
+        ListHeaderComponent={
+          frequentMeals.length > 0 && foodLog.length >= 3 ? (
+            <View style={{ marginBottom: 16 }}>
               <Text
                 style={{
                   fontFamily: fontFamily.regular,
-                  fontSize: 14,
-                  color: "#282828",
+                  fontSize: 11,
+                  color: colors.textTertiary,
+                  letterSpacing: 1.5,
+                  marginBottom: 8,
                 }}
               >
-                nothing logged yet.
+                REPEAT A MEAL
               </Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={{ gap: 8 }}
+              >
+                {frequentMeals.map((m) => (
+                  <Pressable
+                    key={m.description}
+                    onPress={() => handleRepeatMeal(m.description)}
+                    style={{
+                      backgroundColor: "rgba(255,255,255,0.07)",
+                      borderWidth: 1,
+                      borderColor: "rgba(255,255,255,0.1)",
+                      borderRadius: radius.pill,
+                      paddingHorizontal: 14,
+                      paddingVertical: 10,
+                      maxWidth: 180,
+                    }}
+                  >
+                    <Text numberOfLines={1} style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
+                      {m.description}
+                    </Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            </View>
+          ) : null
+        }
+        ListEmptyComponent={
+          !isLoading ? (
+            <View
+              style={{
+                flex: 1,
+                paddingTop: 32,
+                paddingHorizontal: spacing.contentPadding,
+              }}
+            >
+              <View
+                style={{
+                  borderWidth: 1,
+                  borderStyle: "dashed",
+                  borderColor: colors.borderSubtle,
+                  borderRadius: radius.card,
+                  padding: 16,
+                }}
+              >
+                <Text
+                  style={{
+                    fontFamily: fontFamily.regular,
+                    fontSize: 14,
+                    color: colors.textSecondary,
+                    lineHeight: 22,
+                  }}
+                >
+                  {getEmptyStateSuggestion()}
+                </Text>
+              </View>
             </View>
           ) : null
         }
         renderItem={renderFoodItem}
       />
-
-      {/* Macro Bar — Persistent Bottom */}
-      <View
-        style={{
-          backgroundColor: "#080808",
-borderTopWidth: 1,
-            borderTopColor: "#111111",
-            paddingHorizontal: spacing.contentPadding,
-            paddingTop: 12,
-          paddingBottom: 10,
-        }}
-      >
-        <View
-          style={{ flexDirection: "row", alignItems: "center", gap: 12 }}
-        >
-          <GlowRing
-            size={36}
-            progress={calProgress}
-            color={ringColor}
-            centerLabel=""
-          />
-          <View style={{ flex: 1 }}>
-            <View
-              style={{
-                flexDirection: "row",
-                alignItems: "baseline",
-                gap: 5,
-              }}
-            >
-              <Text
-                style={{
-                  fontFamily: fontFamily.bold,
-                  fontSize: 16,
-                  color: "#f0f0f0",
-                }}
-              >
-                {`${totalCalories}`}
-              </Text>
-              <Text
-                style={{
-                  fontFamily: fontFamily.regular,
-                  fontSize: 13,
-                  color: "#444444",
-                }}
-              >
-                cal
-              </Text>
-              <Text
-                style={{
-                  fontFamily: fontFamily.regular,
-                  fontSize: 13,
-                  color: "#282828",
-                  marginLeft: 4,
-                }}
-              >
-                {`${caloriesLeft} left`}
-              </Text>
-            </View>
-          </View>
-          <View style={{ flexDirection: "row", alignItems: "baseline" }}>
-            <Text
-              style={{
-                fontFamily: fontFamily.bold,
-                fontSize: 14,
-                color: "#3b82f6",
-              }}
-            >
-              {`${Math.round(totalProtein)}g`}
-            </Text>
-            <Text
-              style={{
-                fontFamily: fontFamily.regular,
-                fontSize: 13,
-                color: "#444444",
-              }}
-            >
-              {" protein"}
-            </Text>
-          </View>
-        </View>
-      </View>
 
       <Modal
         visible={imageConfirmState.visible}

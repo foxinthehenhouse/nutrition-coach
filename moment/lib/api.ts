@@ -1,3 +1,5 @@
+import { supabase } from "./supabase";
+
 const API_URL = process.env.EXPO_PUBLIC_API_URL ?? "";
 
 export async function logFood(description: string): Promise<{ message: string; logged?: Record<string, unknown> }> {
@@ -14,4 +16,17 @@ export async function logFood(description: string): Promise<{ message: string; l
     throw new Error(data.error ?? `Request failed: ${res.status}`);
   }
   return data;
+}
+
+export async function deleteFoodLogEntry(id: string): Promise<void> {
+  const { error } = await supabase.from("food_log").delete().eq("id", id);
+  if (error) throw new Error(error.message);
+}
+
+export async function updateFoodLogEntry(
+  id: string,
+  payload: { description?: string; calories?: number; protein_g?: number; carbs_g?: number; fat_g?: number }
+): Promise<void> {
+  const { error } = await supabase.from("food_log").update(payload).eq("id", id);
+  if (error) throw new Error(error.message);
 }

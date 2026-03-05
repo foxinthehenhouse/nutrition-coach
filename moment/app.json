@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "moment",
-    "slug": "moment",
+    "slug": "moment-nutrition",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -15,14 +15,20 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.moment.app"
+      "bundleIdentifier": "com.moment.app",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#080808"
       },
-      "package": "com.moment.app"
+      "package": "com.moment.app",
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -32,6 +38,14 @@
     "plugins": [
       "expo-router",
       "expo-image-picker"
-    ]
+    ],
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "eb41cc64-68d8-4428-b312-5974a775669a"
+      }
+    }
   }
 }

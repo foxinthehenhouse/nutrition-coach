@@ -10,9 +10,13 @@ import {
 import { router } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { supabase } from "../../lib/supabase";
-import { fontFamily } from "../../lib/theme";
+import { colors, fontFamily, radius, spacing } from "../../lib/theme";
 
-const GOALS = ["maintenance", "performance", "recomp"] as const;
+const GOALS = [
+  { id: "maintenance", label: "maintenance", description: "Maintain weight and energy. Steady calories and protein." },
+  { id: "performance", label: "performance", description: "Maximize training output and recovery. Higher calories and protein on training days." },
+  { id: "recomp", label: "recomp", description: "Build muscle while staying lean. Moderate surplus with focus on protein." },
+] as const;
 
 function Pill({
   label,
@@ -27,9 +31,9 @@ function Pill({
     <Pressable onPress={onPress}>
       <View
         style={{
-          backgroundColor: selected ? "#161616" : "#0f0f0f",
-          borderWidth: 1,
-          borderColor: selected ? "rgba(168,237,234,0.3)" : "#1c1c1c",
+          backgroundColor: selected ? "transparent" : "rgba(255,255,255,0.07)",
+          borderWidth: selected ? 2 : 1,
+          borderColor: selected ? colors.textPrimary : "rgba(255,255,255,0.1)",
           borderRadius: 999,
           paddingHorizontal: 14,
           paddingVertical: 8,
@@ -39,7 +43,7 @@ function Pill({
           style={{
             fontFamily: fontFamily.regular,
             fontSize: 13,
-            color: selected ? "#f0f0f0" : "#3a3a3a",
+            color: selected ? colors.textPrimary : "rgba(255,255,255,0.6)",
           }}
         >
           {label}
@@ -54,57 +58,16 @@ function SectionLabel({ children }: { children: string }) {
     <Text
       style={{
         fontFamily: fontFamily.regular,
-        fontSize: 10,
-        color: "#282828",
+        fontSize: 11,
+        color: colors.textTertiary,
         textTransform: "uppercase",
-        letterSpacing: 3,
-        marginTop: 40,
-        marginBottom: 14,
+        letterSpacing: 1.5,
+        marginTop: 24,
+        marginBottom: 10,
       }}
     >
       {children}
     </Text>
-  );
-}
-
-function SaveButton({
-  onSave,
-}: {
-  onSave: () => Promise<void>;
-}) {
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const timeout = useRef<ReturnType<typeof setTimeout>>();
-
-  const handlePress = async () => {
-    setSaving(true);
-    await onSave();
-    setSaving(false);
-    setSaved(true);
-    if (timeout.current) clearTimeout(timeout.current);
-    timeout.current = setTimeout(() => setSaved(false), 1500);
-  };
-
-  useEffect(() => {
-    return () => {
-      if (timeout.current) clearTimeout(timeout.current);
-    };
-  }, []);
-
-  if (saving) return <ActivityIndicator color="#f0f0f0" size="small" />;
-
-  return (
-    <Pressable onPress={handlePress}>
-      <Text
-        style={{
-          fontFamily: saved ? fontFamily.regular : fontFamily.bold,
-          fontSize: 14,
-          color: saved ? "#22c55e" : "#f0f0f0",
-        }}
-      >
-        {saved ? "saved ✓" : "save"}
-      </Text>
-    </Pressable>
   );
 }
 
@@ -118,14 +81,15 @@ export default function Profile() {
   const [goalMode, setGoalMode] = useState("maintenance");
   const [phone, setPhone] = useState("");
   const [whoopConnected, setWhoopConnected] = useState(false);
-  const [whoopSkipped, setWhoopSkipped] = useState(false);
+  const [whoopData, setWhoopData] = useState<{ recovery_score?: number; strain_score?: number; hrv_rmssd?: number } | null>(null);
   const [focusedField, setFocusedField] = useState<string | null>(null);
+  const [targetsSaved, setTargetsSaved] = useState(false);
+  const [phoneSaved, setPhoneSaved] = useState(false);
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
 
   useEffect(() => {
     (async () => {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
+      const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
       const m = user.user_metadata ?? {};
       setEmail(user.email ?? "");
@@ -135,21 +99,28 @@ export default function Profile() {
       setGoalMode(m.goal_mode ?? "maintenance");
       setPhone(m.phone ?? "");
       setWhoopConnected(!!m.whoop_connected);
-      setWhoopSkipped(!!m.whoop_skipped);
+      const todayStr = new Date().toISOString().split("T")[0];
+      const { data: whoop } = await supabase.from("whoop_cache").select("recovery_score, strain_score, hrv_rmssd").eq("date", todayStr).maybeSingle();
+      setWhoopData(whoop ?? null);
       setLoading(false);
     })();
   }, []);
 
+  const suggestedCal = 2900;
+  const suggestedProtein = 190;
+  const showSuggestion = !calorieTarget && !proteinTarget;
+
   const inputStyle = (field: string) => ({
-    backgroundColor: "#0f0f0f",
+    backgroundColor: colors.surfaceElevated,
     borderWidth: 1,
-    borderColor:
-      focusedField === field ? "rgba(168,237,234,0.25)" : "#1c1c1c",
-    borderRadius: 14,
-    padding: 14,
+    borderColor: focusedField === field ? "rgba(255,255,255,0.2)" : colors.borderSubtle,
+    borderRadius: radius.input,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    height: 56,
     fontFamily: fontFamily.regular,
-    fontSize: 14,
-    color: "#f0f0f0",
+    fontSize: 20,
+    color: colors.textPrimary,
   });
 
   const handleGoalChange = async (goal: string) => {
@@ -157,62 +128,128 @@ export default function Profile() {
     await supabase.auth.updateUser({ data: { goal_mode: goal } });
   };
 
+  const handleUseSuggested = () => {
+    setCalorieTarget(String(suggestedCal));
+    setProteinTarget(String(suggestedProtein));
+  };
+
+  const handleSaveTargets = async () => {
+    const cal = parseInt(calorieTarget, 10);
+    const prot = parseInt(proteinTarget, 10);
+    await supabase.auth.updateUser({
+      data: {
+        ...(Number.isFinite(cal) && { calorie_target: cal }),
+        ...(Number.isFinite(prot) && { protein_target: prot }),
+      },
+    });
+    setTargetsSaved(true);
+    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+    saveTimeoutRef.current = setTimeout(() => setTargetsSaved(false), 2000);
+  };
+
+  const handleSavePhone = async () => {
+    await supabase.auth.updateUser({ data: { phone } });
+    setPhoneSaved(true);
+    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+    saveTimeoutRef.current = setTimeout(() => setPhoneSaved(false), 2000);
+  };
+
   const handleSignOut = async () => {
     await supabase.auth.signOut();
     router.replace("/(auth)");
   };
 
+  const currentGoalDesc = GOALS.find((g) => g.id === goalMode)?.description ?? "";
+
   if (loading) {
     return (
-      <View
-        style={{
-          flex: 1,
-          backgroundColor: "#080808",
-          justifyContent: "center",
-          alignItems: "center",
-        }}
-      >
-        <ActivityIndicator color="#22c55e" />
+      <View style={{ flex: 1, backgroundColor: colors.bg, justifyContent: "center", alignItems: "center" }}>
+        <ActivityIndicator color={colors.accentGreen} />
       </View>
     );
   }
 
   return (
     <ScrollView
-      style={{ backgroundColor: "#080808" }}
+      style={{ backgroundColor: colors.bg }}
       contentContainerStyle={{
-        paddingHorizontal: 24,
-        paddingTop: insets.top + 32,
+        paddingHorizontal: spacing.contentPadding,
+        paddingTop: insets.top + 24,
         paddingBottom: 60,
       }}
       keyboardShouldPersistTaps="handled"
     >
-      <Text
-        style={{
-          fontFamily: fontFamily.regular,
-          fontSize: 13,
-          color: "#444444",
-        }}
-      >
+      <Text style={{ fontFamily: fontFamily.regular, fontSize: 15, color: colors.textSecondary }}>
         {email}
       </Text>
-      {name ? (
+      <View style={{ flexDirection: "row", gap: 12, marginTop: 8 }}>
+        <Pressable onPress={() => {}} hitSlop={8}>
+          <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.accentBlue }}>Edit profile</Text>
+        </Pressable>
+        <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textTertiary }}>|</Text>
+        <Pressable onPress={handleSignOut} hitSlop={8}>
+          <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.accentBlue }}>Log out</Text>
+        </Pressable>
+      </View>
+
+      <SectionLabel>Goal</SectionLabel>
+      <View
+        style={{
+          backgroundColor: colors.surface,
+          borderRadius: radius.card,
+          padding: spacing.cardPaddingH,
+          marginHorizontal: 0,
+          borderWidth: 1,
+          borderColor: colors.borderSubtle,
+        }}
+      >
+        <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+          {GOALS.map((g) => (
+            <Pill
+              key={g.id}
+              label={g.label}
+              selected={goalMode === g.id}
+              onPress={() => handleGoalChange(g.id)}
+            />
+          ))}
+        </View>
         <Text
           style={{
-            fontFamily: fontFamily.bold,
-            fontSize: 20,
-            color: "#f0f0f0",
-            marginTop: 4,
+            fontFamily: fontFamily.regular,
+            fontSize: 14,
+            color: "rgba(255,255,255,0.6)",
+            marginTop: 12,
+            lineHeight: 20,
           }}
         >
-          {name}
+          {currentGoalDesc}
         </Text>
-      ) : null}
+      </View>
 
-      <SectionLabel>targets</SectionLabel>
+      <SectionLabel>Targets</SectionLabel>
+      {showSuggestion && (
+        <View
+          style={{
+            backgroundColor: colors.surfaceElevated,
+            borderRadius: 12,
+            padding: 14,
+            marginBottom: 12,
+          }}
+        >
+          <Text style={{ fontFamily: fontFamily.regular, fontSize: 14, color: colors.textSecondary }}>
+            Based on your performance goal and WHOOP data, we suggest: {suggestedCal} cal · {suggestedProtein}g protein
+          </Text>
+          <Pressable
+            onPress={handleUseSuggested}
+            style={{ alignSelf: "flex-start", marginTop: 8 }}
+          >
+            <Text style={{ fontFamily: fontFamily.bold, fontSize: 14, color: colors.accentBlue }}>Use these</Text>
+          </Pressable>
+        </View>
+      )}
       <TextInput
         placeholder="calories"
-        placeholderTextColor="#282828"
+        placeholderTextColor={colors.textTertiary}
         value={calorieTarget}
         onChangeText={setCalorieTarget}
         keyboardType="numeric"
@@ -222,7 +259,7 @@ export default function Profile() {
       />
       <TextInput
         placeholder="protein (g)"
-        placeholderTextColor="#282828"
+        placeholderTextColor={colors.textTertiary}
         value={proteinTarget}
         onChangeText={setProteinTarget}
         keyboardType="numeric"
@@ -230,137 +267,103 @@ export default function Profile() {
         onBlur={() => setFocusedField(null)}
         style={inputStyle("protein")}
       />
-      <View
+      <Pressable
+        onPress={handleSaveTargets}
         style={{
-          flexDirection: "row",
-          justifyContent: "flex-end",
-          marginTop: 8,
-        }}
-      >
-        <SaveButton
-          onSave={async () => {
-            await supabase.auth.updateUser({
-              data: {
-                calorie_target: parseInt(calorieTarget),
-                protein_target: parseInt(proteinTarget),
-              },
-            });
-          }}
-        />
-      </View>
-
-      <SectionLabel>goal</SectionLabel>
-      <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
-        {GOALS.map((g) => (
-          <Pill
-            key={g}
-            label={g}
-            selected={goalMode === g}
-            onPress={() => handleGoalChange(g)}
-          />
-        ))}
-      </View>
-
-      <SectionLabel>wearable</SectionLabel>
-      <View
-        style={{
-          flexDirection: "row",
-          justifyContent: "space-between",
+          marginTop: 16,
+          height: 56,
+          borderRadius: radius.input,
+          backgroundColor: colors.textPrimary,
           alignItems: "center",
+          justifyContent: "center",
         }}
       >
-        <Text
-          style={{
-            fontFamily: fontFamily.regular,
-            fontSize: 15,
-            color: "#f0f0f0",
-          }}
-        >
-          WHOOP
+        <Text style={{ fontFamily: fontFamily.bold, fontSize: 17, color: colors.bg }}>
+          {targetsSaved ? "Saved ✓" : "Save targets"}
         </Text>
-        {whoopConnected ? (
-          <Text
-            style={{
-              fontFamily: fontFamily.regular,
-              fontSize: 13,
-              color: "#22c55e",
-            }}
-          >
-            connected
-          </Text>
-        ) : (
-          <Pressable
-            onPress={() => router.push("/(onboarding)/whoop")}
-            style={{ minHeight: 44, justifyContent: "center", paddingVertical: 10 }}
-          >
-            <Text
-              style={{
-                fontFamily: fontFamily.regular,
-                fontSize: 13,
-                color: "#444444",
-              }}
+      </Pressable>
+
+      <SectionLabel>Wearable</SectionLabel>
+      <View
+        style={{
+          backgroundColor: colors.surface,
+          borderRadius: radius.card,
+          padding: spacing.cardPaddingH,
+          borderWidth: 1,
+          borderColor: colors.borderSubtle,
+        }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+          <Text style={{ fontFamily: fontFamily.bold, fontSize: 15, color: colors.textPrimary }}>WHOOP</Text>
+          {whoopConnected ? (
+            <View style={{ backgroundColor: colors.greenDim, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999 }}>
+              <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.accentGreen }}>✓ Connected</Text>
+            </View>
+          ) : (
+            <Pressable
+              onPress={() => router.push("/(onboarding)/whoop")}
+              style={{ backgroundColor: colors.textPrimary, paddingHorizontal: 24, paddingVertical: 8, borderRadius: 10 }}
             >
-              {"connect →"}
+              <Text style={{ fontFamily: fontFamily.bold, fontSize: 13, color: colors.bg }}>Connect</Text>
+            </Pressable>
+          )}
+        </View>
+        {whoopConnected ? (
+          <>
+            <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textTertiary, marginTop: 8 }}>
+              Last sync: today
             </Text>
-          </Pressable>
+            {whoopData && (whoopData.recovery_score != null || whoopData.strain_score != null) && (
+              <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary, marginTop: 4 }}>
+                Recovery {whoopData.recovery_score != null ? `${Math.round(whoopData.recovery_score)}%` : "–"} · Strain {whoopData.strain_score != null ? whoopData.strain_score.toFixed(1) : "–"} · HRV {whoopData.hrv_rmssd != null ? Math.round(whoopData.hrv_rmssd) : "–"}
+              </Text>
+            )}
+          </>
+        ) : (
+          <Text style={{ fontFamily: fontFamily.regular, fontSize: 14, color: "rgba(255,255,255,0.6)", marginTop: 8 }}>
+            Sync recovery, strain & HRV to personalize your daily calorie and protein targets.
+          </Text>
         )}
       </View>
 
-      <SectionLabel>sms</SectionLabel>
-      <TextInput
-        placeholder="+61 4xx xxx xxx"
-        placeholderTextColor="#282828"
-        value={phone}
-        onChangeText={setPhone}
-        keyboardType="phone-pad"
-        onFocus={() => setFocusedField("phone")}
-        onBlur={() => setFocusedField(null)}
-        style={inputStyle("phone")}
-      />
+      <SectionLabel>SMS coaching</SectionLabel>
       <View
         style={{
-          flexDirection: "row",
-          justifyContent: "flex-end",
-          marginTop: 8,
+          backgroundColor: colors.surface,
+          borderRadius: radius.card,
+          padding: spacing.cardPaddingH,
+          borderWidth: 1,
+          borderColor: colors.borderSubtle,
         }}
       >
-        <SaveButton
-          onSave={async () => {
-            await supabase.auth.updateUser({ data: { phone } });
+        <Text style={{ fontFamily: fontFamily.regular, fontSize: 14, color: "rgba(255,255,255,0.6)", marginBottom: 8 }}>
+          Log meals and get coaching by text. Reply to any message to chat with your AI nutrition coach.
+        </Text>
+        <TextInput
+          placeholder="+61 4xx xxx xxx"
+          placeholderTextColor={colors.textTertiary}
+          value={phone}
+          onChangeText={setPhone}
+          keyboardType="phone-pad"
+          onFocus={() => setFocusedField("phone")}
+          onBlur={() => setFocusedField(null)}
+          style={{
+            ...inputStyle("phone"),
+            marginBottom: 8,
+            fontSize: 17,
           }}
         />
+        <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
+          <Pressable onPress={handleSavePhone}>
+            <Text style={{ fontFamily: fontFamily.bold, fontSize: 14, color: colors.textPrimary }}>{phoneSaved ? "Saved ✓" : "Save"}</Text>
+          </Pressable>
+        </View>
+        {phone && phoneSaved && (
+          <Text style={{ fontFamily: fontFamily.regular, fontSize: 12, color: colors.accentGreen, marginTop: 6 }}>
+            Active — you can log via SMS
+          </Text>
+        )}
       </View>
-      <Text
-        style={{
-          fontFamily: fontFamily.regular,
-          fontSize: 11,
-          color: "#444444",
-          marginTop: 6,
-        }}
-      >
-        linked to your nutrition coach
-      </Text>
-
-      <Pressable
-        onPress={handleSignOut}
-        style={{
-          marginTop: 60,
-          minHeight: 44,
-          justifyContent: "center",
-          paddingVertical: 12,
-        }}
-      >
-        <Text
-          style={{
-            fontFamily: fontFamily.regular,
-            fontSize: 14,
-            color: "#444444",
-            textAlign: "center",
-          }}
-        >
-          sign out
-        </Text>
-      </Pressable>
     </ScrollView>
   );
 }
