@@ -127,7 +127,7 @@ export default function AuthLogin() {
             style={{
               fontFamily: fontFamily.regular,
               fontSize: 14,
-              color: "#444444",
+              color: "rgba(255,255,255,0.45)",
               marginTop: 8,
             }}
           >
@@ -164,7 +164,7 @@ export default function AuthLogin() {
 
         <TextInput
           placeholder="email"
-          placeholderTextColor="#282828"
+          placeholderTextColor="rgba(255,255,255,0.25)"
           value={email}
           onChangeText={setEmail}
           onFocus={() => setFocused(true)}
@@ -176,9 +176,11 @@ export default function AuthLogin() {
             fontFamily: fontFamily.regular,
             fontSize: 15,
             color: "#f0f0f0",
-            backgroundColor: "#0f0f0f",
+            backgroundColor: "#10111C",
             borderWidth: 1,
-            borderColor: focused ? "rgba(168,237,234,0.25)" : "#1c1c1c",
+            borderColor: focused
+              ? "rgba(255,255,255,0.30)"
+              : "rgba(255,255,255,0.12)",
             borderRadius: 14,
             padding: 16,
           }}
@@ -219,7 +221,7 @@ export default function AuthLogin() {
               style={{
                 fontFamily: fontFamily.bold,
                 fontSize: 15,
-                color: disabled ? "#444444" : "#080808",
+                color: disabled ? "rgba(255,255,255,0.35)" : "#080808",
               }}
             >
               continue
@@ -231,7 +233,7 @@ export default function AuthLogin() {
           style={{
             fontFamily: fontFamily.regular,
             fontSize: 12,
-            color: "#444444",
+            color: "rgba(255,255,255,0.30)",
             textAlign: "center",
             marginTop: 16,
           }}

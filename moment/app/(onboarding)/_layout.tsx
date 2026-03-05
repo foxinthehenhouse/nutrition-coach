@@ -7,7 +7,7 @@ export default function OnboardingLayout() {
       <Stack
         screenOptions={{
           headerShown: false,
-          contentStyle: { backgroundColor: "#080808" },
+          contentStyle: { backgroundColor: "#080810" },
         }}
       />
     </AuthGuard>
