@@ -208,6 +208,26 @@ Operational validation checklist:
 - Midday/evening checkpoints reflect local-day pace status (`behind/on_track/ahead`)
 - WHOOP `workout.updated`, `sleep.updated`, and `recovery.updated` each trigger at most one nudge per cooldown window
 
+## WHOOP Token Error Handling in n8n
+
+If you use n8n to call the WHOOP API or `/sync/whoop`, wrap the WHOOP call with this error handler so transient token failures do not spam SMS alerts:
+
+```javascript
+// In your n8n Function node, before sending SMS:
+if (whoopError && whoopError.includes('token')) {
+  // Silently attempt refresh. Do NOT send SMS.
+  // Only send SMS if refresh fails 3 consecutive times.
+  const failCount = $workflow.staticData.whoopFailCount || 0;
+  $workflow.staticData.whoopFailCount = failCount + 1;
+
+  if (failCount < 3) {
+    return []; // Stop execution, no SMS sent
+  }
+  // After 3 failures, send ONE alert (not one per trigger)
+  $workflow.staticData.whoopFailCount = 0;
+}
+```
+
 ## Voice Note Support
 
 The bot supports voice notes sent as audio MMS. When a voice note is received, it's automatically transcribed using OpenAI Whisper and processed exactly like a text message.
