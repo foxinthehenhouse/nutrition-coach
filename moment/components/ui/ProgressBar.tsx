@@ -1,12 +1,22 @@
 import React, { useEffect, useRef } from "react";
-import { View, Animated, Easing } from "react-native";
-import { colors, motion } from "../../lib/theme";
+import { View, Animated, Easing, StyleSheet } from "react-native";
+import { LinearGradient } from "expo-linear-gradient";
+import { colors, motion, holoGradients, proteinBarColor } from "../../lib/theme";
 
-type ProgressBarProps = {
-  progress: number; // 0..1
+const BAR_HEIGHT = 8;
+const BAR_RADIUS = 4;
+const RANGE_BAND_COLOR = "rgba(255,255,255,0.12)";
+
+type ProgressBarVariant = "holo-primary" | "holo-protein" | "solid";
+
+export type ProgressBarProps = {
+  progress: number;
+  variant?: ProgressBarVariant;
   color?: string;
   height?: number;
   borderRadius?: number;
+  rangeMin?: number;
+  rangeMax?: number;
   animated?: boolean;
   accessibilityLabel?: string;
   accessibilityValue?: { text: string };
@@ -14,9 +24,12 @@ type ProgressBarProps = {
 
 export function ProgressBar({
   progress,
+  variant = "solid",
   color = colors.accentBlue,
-  height = 6,
-  borderRadius = 3,
+  height = BAR_HEIGHT,
+  borderRadius = BAR_RADIUS,
+  rangeMin,
+  rangeMax,
   animated = true,
   accessibilityLabel,
   accessibilityValue,
@@ -29,7 +42,7 @@ export function ProgressBar({
       Animated.timing(animValue, {
         toValue: clamped,
         duration: motion.durationBar,
-        easing: Easing.out(Easing.ease),
+        easing: Easing.bezier(0.34, 1.56, 0.64, 1),
         useNativeDriver: false,
       }).start();
     } else {
@@ -42,28 +55,90 @@ export function ProgressBar({
     outputRange: ["0%", "100%"],
   });
 
+  const fillColor =
+    variant === "holo-protein"
+      ? proteinBarColor(clamped)
+      : variant === "solid"
+        ? color
+        : undefined;
+  const useGradient =
+    variant === "holo-primary" || (variant === "holo-protein" && clamped >= 0.9);
+
+  const gradientColors: [string, string, ...string[]] =
+    variant === "holo-primary"
+      ? [...holoGradients.primary] as [string, string, ...string[]]
+      : [...holoGradients.protein] as [string, string, ...string[]];
+
   return (
     <View
-      style={{
-        height,
-        borderRadius,
-        backgroundColor: "rgba(255,255,255,0.1)",
-        overflow: "hidden",
-      }}
+      style={[
+        styles.track,
+        {
+          height,
+          borderRadius,
+        },
+      ]}
       accessibilityLabel={accessibilityLabel}
       accessibilityValue={accessibilityValue}
     >
+      {rangeMin != null && rangeMax != null && rangeMin < rangeMax && (
+        <View
+          style={[
+            styles.rangeBand,
+            {
+              left: `${rangeMin * 100}%`,
+              width: `${(rangeMax - rangeMin) * 100}%`,
+              height,
+              borderRadius,
+            },
+          ]}
+          pointerEvents="none"
+        />
+      )}
       <Animated.View
-        style={{
-          position: "absolute",
-          left: 0,
-          top: 0,
-          bottom: 0,
-          width: widthInterpolate,
-          backgroundColor: color,
-          borderRadius,
-        }}
-      />
+        style={[
+          styles.fillWrap,
+          {
+            width: widthInterpolate,
+            height,
+            borderRadius,
+          },
+        ]}
+      >
+        {useGradient ? (
+          <LinearGradient
+            colors={gradientColors}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 0 }}
+            style={[StyleSheet.absoluteFill, { borderRadius }]}
+          />
+        ) : (
+          <View
+            style={[
+              StyleSheet.absoluteFill,
+              { backgroundColor: fillColor ?? color, borderRadius },
+            ]}
+          />
+        )}
+      </Animated.View>
     </View>
   );
 }
+
+const styles = StyleSheet.create({
+  track: {
+    backgroundColor: "rgba(255,255,255,0.1)",
+    overflow: "hidden",
+  },
+  rangeBand: {
+    position: "absolute",
+    top: 0,
+    backgroundColor: RANGE_BAND_COLOR,
+  },
+  fillWrap: {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    overflow: "hidden",
+  },
+});

@@ -27,7 +27,9 @@ import { StatPill } from "../../components/ui/StatPill";
 import { ProgressBar } from "../../components/ui/ProgressBar";
 import { Toast } from "../../components/ui/Toast";
 import { SwipeableRow } from "../../components/ui/SwipeableRow";
-import { colors, fontFamily, recoveryColor, proteinBarColor, spacing, radius } from "../../lib/theme";
+import { FoodEntryDetailSheet } from "../../components/ui/FoodEntryDetailSheet";
+import { colors, fontFamily, recoveryColor, proteinBarColor, spacing, radius, shadows } from "../../lib/theme";
+import { getRangeTargets } from "../../lib/rangeTargets";
 
 const MEAL_CHIPS = [
   "post-workout 🥩",
@@ -116,6 +118,7 @@ export default function Home() {
   const [undoLogId, setUndoLogId] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [toastVisible, setToastVisible] = useState(false);
+  const [foodEntryDetailId, setFoodEntryDetailId] = useState<string | null>(null);
   const recordingRef = useRef<Audio.Recording | null>(null);
 
   const loadData = useCallback(async () => {
@@ -168,6 +171,12 @@ export default function Home() {
 
   const proteinTarget =
     dailyPlan?.protein_target_g ?? userMeta?.protein_target ?? 160;
+
+  const baseCal = userMeta?.calorie_target ?? calorieTarget;
+  const baseProtein = userMeta?.protein_target ?? proteinTarget;
+  const strain = whoopData?.strain_score ?? 10;
+  const recovery = whoopData?.recovery_score ?? 50;
+  const range = getRangeTargets(baseCal, baseProtein, strain, recovery);
 
   const totalCalories = foodLog.reduce(
     (sum, r) => sum + (r.calories ?? 0),
@@ -523,8 +532,47 @@ export default function Home() {
     return `Aim for ${calorieTarget} cal and ${proteinTarget}g protein today.`;
   };
 
+  const postWorkoutMinsRemaining = (whoopData as any)?.last_workout_minutes_remaining ?? null;
+
   const renderWhoopCard = () => {
     if (isLoading) return <PulsingPlaceholder />;
+    if (postWorkoutMinsRemaining != null && postWorkoutMinsRemaining > 0) {
+      const burned = (whoopData as any)?.workout_calories_burned ?? 820;
+      return (
+        <Pressable
+          onPress={() => {
+            setSelectedMealChip("post-workout 🥩");
+            setInput("");
+          }}
+          style={{
+            backgroundColor: colors.surface,
+            borderRadius: radius.card,
+            padding: spacing.cardPaddingH,
+            marginHorizontal: spacing.contentPadding,
+            flexDirection: "row",
+            alignItems: "center",
+            borderWidth: 1,
+            borderColor: colors.border,
+            borderLeftWidth: 3,
+            borderLeftColor: colors.accentGold,
+            ...shadows.card,
+          }}
+        >
+          <View style={{ flex: 1 }}>
+            <Text style={{ fontFamily: fontFamily.regular, fontSize: 11, color: colors.textTertiary, letterSpacing: 1, marginBottom: 4 }}>
+              POST-WORKOUT · {postWorkoutMinsRemaining} min remaining
+            </Text>
+            <Text style={{ fontFamily: fontFamily.regular, fontSize: 14, color: colors.textPrimary, lineHeight: 20 }}>
+              You burned ~{burned} cal. Hit 40g protein + 80g carbs to refuel.
+            </Text>
+            <Text style={{ fontFamily: fontFamily.bold, fontSize: 13, color: colors.accentBlue, marginTop: 10 }}>
+              Refuel now
+            </Text>
+          </View>
+          <Feather name="chevron-right" size={16} color="rgba(255,255,255,0.3)" />
+        </Pressable>
+      );
+    }
     if (whoopData?.recovery_score != null) {
       const score = whoopData.recovery_score;
       return (
@@ -538,7 +586,8 @@ export default function Home() {
             flexDirection: "row",
             alignItems: "center",
             borderWidth: 1,
-            borderColor: colors.borderSubtle,
+            borderColor: colors.border,
+            ...shadows.card,
           }}
         >
           <GlowRing
@@ -579,7 +628,8 @@ export default function Home() {
           flexDirection: "row",
           alignItems: "center",
           borderWidth: 1,
-          borderColor: colors.borderSubtle,
+          borderColor: colors.border,
+          ...shadows.card,
         }}
       >
         <View style={{ width: 5, height: 5, borderRadius: 999, backgroundColor: colors.accentGold }} />
@@ -590,10 +640,16 @@ export default function Home() {
     );
   };
 
-  const calProgress = Math.min(totalCalories / calorieTarget, 1);
-  const proteinProgress = proteinTarget > 0 ? Math.min(totalProtein / proteinTarget, 1) : 0;
-  const remainingCal = Math.max(0, calorieTarget - totalCalories);
-  const remainingProtein = Math.max(0, proteinTarget - totalProtein);
+  const calProgress = Math.min(totalCalories / range.calMid, 1);
+  const proteinProgress = range.proteinMid > 0 ? Math.min(totalProtein / range.proteinMid, 1) : 0;
+  const remainingCal = Math.max(0, range.calMid - totalCalories);
+  const remainingProtein = Math.max(0, range.proteinMid - totalProtein);
+  const scaleMaxCal = Math.max(range.calMax, totalCalories, 1);
+  const scaleMaxProtein = Math.max(range.proteinMax, totalProtein, 1);
+  const calRangeMin = range.calMin / scaleMaxCal;
+  const calRangeMax = range.calMax / scaleMaxCal;
+  const proteinRangeMin = range.proteinMin / scaleMaxProtein;
+  const proteinRangeMax = range.proteinMax / scaleMaxProtein;
 
   const getEmptyStateSuggestion = (): string => {
     const hour = new Date().getHours();
@@ -631,56 +687,48 @@ export default function Home() {
       }}
       onRepeat={() => handleRepeatMeal(item.description ?? "")}
     >
-      <View>
-        <View style={{ paddingHorizontal: spacing.contentPadding, paddingVertical: 8, backgroundColor: colors.bg }}>
-          <View
-            style={{
-              flexDirection: "row",
-              justifyContent: "space-between",
-              alignItems: "flex-start",
-            }}
-          >
-            <View style={{ flex: 1, marginRight: 16 }}>
-              <Text
-                numberOfLines={1}
-                ellipsizeMode="tail"
-                style={{
-                  fontFamily: fontFamily.regular,
-                  fontSize: 15,
-                  color: colors.textPrimary,
-                }}
-              >
-                {item.description}
-              </Text>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4 }}>
-                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentGreen }} />
-                <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
-                  {Math.round(item.protein_g ?? 0)}g
-                </Text>
-                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentBlue }} />
-                <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
-                  {Math.round(item.carbs_g ?? 0)}g
-                </Text>
-                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentOrange }} />
-                <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
-                  {Math.round(item.fat_g ?? 0)}g
-                </Text>
-                <View style={{ flex: 1 }} />
-                <Text style={{ fontFamily: fontFamily.regular, fontSize: 12, color: colors.textTertiary }}>
-                  {item.time?.slice(0, 5) ?? ""}
-                </Text>
-              </View>
-            </View>
+      <Pressable
+        onPress={() => setFoodEntryDetailId(item.id)}
+        style={({ pressed }) => ({
+          backgroundColor: pressed ? colors.surfaceL3 : "transparent",
+        })}
+      >
+        <View style={{ paddingHorizontal: spacing.contentPadding, paddingVertical: 8, flexDirection: "row", alignItems: "center" }}>
+          <View style={{ flex: 1 }}>
             <Text
+              numberOfLines={1}
+              ellipsizeMode="tail"
               style={{
-                fontFamily: fontFamily.bold,
-                fontSize: 17,
+                fontFamily: fontFamily.regular,
+                fontSize: 15,
                 color: colors.textPrimary,
               }}
             >
-              {item.calories ?? 0}
+              {item.description}
             </Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4 }}>
+              <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentGreen }} />
+              <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
+                {Math.round(item.protein_g ?? 0)}g
+              </Text>
+              <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentCarb }} />
+              <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
+                {Math.round(item.carbs_g ?? 0)}g
+              </Text>
+              <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentFat }} />
+              <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
+                {Math.round(item.fat_g ?? 0)}g
+              </Text>
+              <View style={{ flex: 1 }} />
+              <Text style={{ fontFamily: fontFamily.regular, fontSize: 12, color: colors.textTertiary }}>
+                {item.time?.slice(0, 5) ?? ""}
+              </Text>
+            </View>
           </View>
+          <Text style={{ fontFamily: fontFamily.bold, fontSize: 17, color: colors.textPrimary, marginRight: 8 }}>
+            {item.calories ?? 0}
+          </Text>
+          <Feather name="chevron-right" size={18} color="rgba(255,255,255,0.25)" />
         </View>
         <View
           style={{
@@ -689,9 +737,11 @@ export default function Home() {
             marginHorizontal: spacing.contentPadding,
           }}
         />
-      </View>
+      </Pressable>
     </SwipeableRow>
   );
+
+  const selectedEntry = foodLog.find((e) => e.id === foodEntryDetailId);
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bg }}>
@@ -703,6 +753,27 @@ export default function Home() {
           setToastMessage(null);
         }}
       />
+      <FoodEntryDetailSheet
+        visible={foodEntryDetailId != null}
+        entry={selectedEntry ?? null}
+        remaining={{
+          protein: Math.max(0, range.proteinMid - totalProtein),
+          carbs: Math.max(0, (range.calMid * 0.5) / 4 - totalCarbs),
+          fat: Math.max(0, (range.calMid * 0.3) / 9 - totalFat),
+        }}
+        onClose={() => setFoodEntryDetailId(null)}
+        onDelete={(e) => {
+          setFoodEntryDetailId(null);
+          Alert.alert("Delete entry", "Remove this meal from today?", [
+            { text: "Cancel", style: "cancel" },
+            { text: "Delete", style: "destructive", onPress: () => handleDeleteEntry(e.id) },
+          ]);
+        }}
+        onLogAgain={(e) => {
+          setFoodEntryDetailId(null);
+          handleRepeatMeal(e.description ?? "");
+        }}
+      />
       {/* WHOOP Coaching Card */}
       <View style={{ paddingTop: insets.top + 12, paddingBottom: 16 }}>
         {renderWhoopCard()}
@@ -712,41 +783,45 @@ export default function Home() {
       <View style={{ paddingHorizontal: spacing.contentPadding, marginBottom: 16 }}>
         <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 8 }}>
           <View>
-            <Text style={{ fontFamily: fontFamily.bold, fontSize: 48, color: colors.textPrimary, letterSpacing: -0.5 }}>
-              {totalCalories}
+            <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textTertiary, marginBottom: 2 }}>
+              {range.calMin.toLocaleString()}–{range.calMax.toLocaleString()} cal range →
             </Text>
-            <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: "rgba(255,255,255,0.45)" }}>
-              calories
+            <Text style={[calProgress >= 0.9 ? { color: colors.accentBlue } : {}, { fontFamily: fontFamily.bold, fontSize: 52, color: colors.textPrimary, letterSpacing: -0.5 }]}>
+              {totalCalories}
             </Text>
           </View>
           <Text style={{ fontFamily: fontFamily.regular, fontSize: 15, color: colors.textSecondary }}>
-            {remainingCal} remaining of {calorieTarget}
+            {remainingCal} to go
           </Text>
         </View>
         <View style={{ marginTop: 8 }}>
           <ProgressBar
+            variant="holo-primary"
             progress={calProgress}
-            color={colors.accentBlue}
-            accessibilityValue={{ text: `${totalCalories} of ${calorieTarget} calories, ${Math.round(calProgress * 100)} percent` }}
+            rangeMin={calRangeMin}
+            rangeMax={calRangeMax}
+            accessibilityValue={{ text: `${totalCalories} of ${range.calMid} calories, ${Math.round(calProgress * 100)} percent` }}
           />
         </View>
         <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end", marginTop: 16, marginBottom: 8 }}>
           <View>
-            <Text style={{ fontFamily: fontFamily.bold, fontSize: 48, color: colors.textPrimary, letterSpacing: -0.5 }}>
-              {Math.round(totalProtein)}g
+            <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textTertiary, marginBottom: 2 }}>
+              {range.proteinMin}–{range.proteinMax}g range →
             </Text>
-            <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: "rgba(255,255,255,0.45)" }}>
-              protein
+            <Text style={{ fontFamily: fontFamily.bold, fontSize: 52, color: colors.textPrimary, letterSpacing: -0.5 }}>
+              {Math.round(totalProtein)}g
             </Text>
           </View>
           <Text style={{ fontFamily: fontFamily.regular, fontSize: 15, color: colors.textSecondary }}>
-            {Math.round(remainingProtein)}g remaining
+            {Math.round(remainingProtein)}g to go
           </Text>
         </View>
         <ProgressBar
+          variant="holo-protein"
           progress={proteinProgress}
-          color={proteinBarColor(proteinProgress)}
-          accessibilityValue={{ text: `${Math.round(totalProtein)} of ${proteinTarget}g protein, ${Math.round(proteinProgress * 100)} percent` }}
+          rangeMin={proteinRangeMin}
+          rangeMax={proteinRangeMax}
+          accessibilityValue={{ text: `${Math.round(totalProtein)} of ${range.proteinMid}g protein, ${Math.round(proteinProgress * 100)} percent` }}
         />
       </View>
 

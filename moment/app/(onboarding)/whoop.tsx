@@ -32,7 +32,7 @@ function Wordmark() {
         maskElement={<Text style={textStyle}>WHOOP</Text>}
       >
         <LinearGradient
-          colors={holoGradient as unknown as string[]}
+          colors={[...holoGradient] as [string, string, ...string[]]}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 0 }}
         >

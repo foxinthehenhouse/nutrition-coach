@@ -10,7 +10,8 @@ import {
 import { router } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { supabase } from "../../lib/supabase";
-import { colors, fontFamily, radius, spacing } from "../../lib/theme";
+import { getRangeTargets } from "../../lib/rangeTargets";
+import { colors, fontFamily, radius, spacing, shadows } from "../../lib/theme";
 
 const GOALS = [
   { id: "maintenance", label: "maintenance", description: "Maintain weight and energy. Steady calories and protein." },
@@ -109,6 +110,11 @@ export default function Profile() {
   const suggestedCal = 2900;
   const suggestedProtein = 190;
   const showSuggestion = !calorieTarget && !proteinTarget;
+  const baseCal = Number(calorieTarget) || suggestedCal;
+  const baseProtein = Number(proteinTarget) || suggestedProtein;
+  const strain = whoopData?.strain_score ?? 10;
+  const recovery = whoopData?.recovery_score ?? 50;
+  const range = getRangeTargets(baseCal, baseProtein, strain, recovery);
 
   const inputStyle = (field: string) => ({
     backgroundColor: colors.surfaceElevated,
@@ -200,7 +206,8 @@ export default function Profile() {
           padding: spacing.cardPaddingH,
           marginHorizontal: 0,
           borderWidth: 1,
-          borderColor: colors.borderSubtle,
+          borderColor: colors.border,
+          ...shadows.card,
         }}
       >
         <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
@@ -227,6 +234,11 @@ export default function Profile() {
       </View>
 
       <SectionLabel>Targets</SectionLabel>
+      {(calorieTarget || proteinTarget) && (
+        <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textTertiary, marginBottom: 10 }}>
+          Your target range: {range.calMin.toLocaleString()}–{range.calMax.toLocaleString()} cal · {range.proteinMin}–{range.proteinMax}g protein
+        </Text>
+      )}
       {showSuggestion && (
         <View
           style={{
@@ -237,7 +249,7 @@ export default function Profile() {
           }}
         >
           <Text style={{ fontFamily: fontFamily.regular, fontSize: 14, color: colors.textSecondary }}>
-            Based on your performance goal and WHOOP data, we suggest: {suggestedCal} cal · {suggestedProtein}g protein
+            Based on your performance goal and WHOOP data, we suggest: {range.calMin.toLocaleString()}–{range.calMax.toLocaleString()} cal · {range.proteinMin}–{range.proteinMax}g protein
           </Text>
           <Pressable
             onPress={handleUseSuggested}
@@ -290,7 +302,8 @@ export default function Profile() {
           borderRadius: radius.card,
           padding: spacing.cardPaddingH,
           borderWidth: 1,
-          borderColor: colors.borderSubtle,
+          borderColor: colors.border,
+          ...shadows.card,
         }}
       >
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
@@ -333,7 +346,8 @@ export default function Profile() {
           borderRadius: radius.card,
           padding: spacing.cardPaddingH,
           borderWidth: 1,
-          borderColor: colors.borderSubtle,
+          borderColor: colors.border,
+          ...shadows.card,
         }}
       >
         <Text style={{ fontFamily: fontFamily.regular, fontSize: 14, color: "rgba(255,255,255,0.6)", marginBottom: 8 }}>

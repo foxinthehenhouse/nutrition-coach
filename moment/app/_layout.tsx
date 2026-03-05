@@ -3,7 +3,7 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { GluestackUIProvider } from "@gluestack-ui/themed";
 import { config } from "@gluestack-ui/config";
 import { Stack } from "expo-router";
-import { useFonts } from "../lib/theme";
+import { useFonts, colors } from "../lib/theme";
 
 export default function RootLayout() {
   const [fontsLoaded] = useFonts();
@@ -18,7 +18,7 @@ export default function RootLayout() {
         <Stack
         screenOptions={{
           headerShown: false,
-          contentStyle: { backgroundColor: "#080808" },
+          contentStyle: { backgroundColor: colors.bg },
         }}
         />
       </GluestackUIProvider>

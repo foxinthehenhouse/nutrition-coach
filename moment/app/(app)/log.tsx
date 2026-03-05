@@ -207,11 +207,11 @@ export default function Log() {
               <Text style={{ fontFamily: fontFamily.regular, fontSize: 12, color: colors.textSecondary }}>
                 {Math.round(section.totalP)}g
               </Text>
-              <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentBlue }} />
+              <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentCarb }} />
               <Text style={{ fontFamily: fontFamily.regular, fontSize: 12, color: colors.textSecondary }}>
                 {Math.round(section.totalC)}g
               </Text>
-              <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentOrange }} />
+              <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentFat }} />
               <Text style={{ fontFamily: fontFamily.regular, fontSize: 12, color: colors.textSecondary }}>
                 {Math.round(section.totalF)}g
               </Text>
@@ -307,11 +307,11 @@ export default function Log() {
                       <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
                         {Math.round(item.protein_g ?? 0)}g
                       </Text>
-                      <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentBlue }} />
+                      <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentCarb }} />
                       <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
                         {Math.round(item.carbs_g ?? 0)}g
                       </Text>
-                      <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentOrange }} />
+                      <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accentFat }} />
                       <Text style={{ fontFamily: fontFamily.regular, fontSize: 13, color: colors.textSecondary }}>
                         {Math.round(item.fat_g ?? 0)}g
                       </Text>

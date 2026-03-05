@@ -9,7 +9,8 @@ import {
   type TextInputFocusEventData,
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
-import { colors, fontFamily, radius } from "../../lib/theme";
+import { LinearGradient } from "expo-linear-gradient";
+import { colors, fontFamily, radius, holoGradients } from "../../lib/theme";
 
 type InputBarProps = {
   value: string;
@@ -71,17 +72,26 @@ export function InputBar({
 
   return (
     <View
-      style={{
-        height: 56,
-        flexDirection: "row",
-        alignItems: "center",
-        backgroundColor: colors.surfaceElevated,
-        borderWidth: 1,
-        borderColor: "rgba(255,255,255,0.1)",
-        borderRadius: radius.inputBar,
-        paddingLeft: 16,
-        paddingRight: 12,
-      }}
+      style={[
+        {
+          height: 56,
+          flexDirection: "row",
+          alignItems: "center",
+          backgroundColor: colors.surfaceElevated,
+          borderWidth: 1,
+          borderColor: focused ? "rgba(91,156,246,0.6)" : "rgba(255,255,255,0.1)",
+          borderRadius: radius.inputBar,
+          paddingLeft: 16,
+          paddingRight: 12,
+        },
+        focused && {
+          shadowColor: colors.accentBlue,
+          shadowOffset: { width: 0, height: 0 },
+          shadowOpacity: 0.2,
+          shadowRadius: 12,
+          elevation: 4,
+        },
+      ]}
     >
       <Pressable onPress={onCamera} hitSlop={12} style={{ padding: 8 }} accessibilityLabel="Log meal with camera">
         <Feather name="camera" size={20} color={ICON_COLOR} />
@@ -122,13 +132,36 @@ export function InputBar({
             width: SEND_BTN_SIZE,
             height: SEND_BTN_SIZE,
             borderRadius: SEND_BTN_SIZE / 2,
-            backgroundColor: hasText ? colors.textPrimary : "rgba(255,255,255,0.2)",
+            overflow: "hidden",
             alignItems: "center",
             justifyContent: "center",
           }}
           accessibilityLabel="Send"
         >
-          <Feather name="arrow-right" size={16} color={hasText ? colors.bg : "rgba(255,255,255,0.5)"} />
+          {hasText ? (
+            <LinearGradient
+              colors={[...holoGradients.primary]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={{
+                position: "absolute",
+                width: SEND_BTN_SIZE,
+                height: SEND_BTN_SIZE,
+                borderRadius: SEND_BTN_SIZE / 2,
+              }}
+            />
+          ) : (
+            <View
+              style={{
+                position: "absolute",
+                width: SEND_BTN_SIZE,
+                height: SEND_BTN_SIZE,
+                borderRadius: SEND_BTN_SIZE / 2,
+                backgroundColor: "rgba(255,255,255,0.1)",
+              }}
+            />
+          )}
+          <Feather name="arrow-right" size={16} color={hasText ? colors.textPrimary : "rgba(255,255,255,0.5)"} />
         </Pressable>
       </Animated.View>
     </View>
