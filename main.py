@@ -61,6 +61,7 @@ SUPABASE_DB_PASSWORD = os.getenv("SUPABASE_DB_PASSWORD")
 OWNER_PHONE_NUMBER = os.getenv("OWNER_PHONE_NUMBER")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SYNC_ADMIN_TOKEN = os.getenv("SYNC_ADMIN_TOKEN")
+DISABLE_PROACTIVE_SMS = os.getenv("DISABLE_PROACTIVE_SMS", "").strip().lower() in ("1", "true", "yes")
 
 WHOOP_BASE_URL = "https://api.prod.whoop.com/developer"
 WHOOP_AUTH_URL = "https://api.prod.whoop.com/oauth/oauth2/auth"
@@ -392,7 +393,10 @@ def log_to_conversation(inbound: str, outbound: str, source: str = "text", flow:
     log_conversation("outbound", outbound, flow=flow, source="system")
 
 
-def send_sms(to: str, body: str):
+def send_sms(to: str, body: str, proactive: bool = False):
+    if proactive and DISABLE_PROACTIVE_SMS:
+        logger.info("Proactive SMS disabled (DISABLE_PROACTIVE_SMS); would have sent to %s: %s", to, body[:80])
+        return
     body = strip_sms_markdown(body) if body else body
     get_twilio().messages.create(body=body, from_=TWILIO_PHONE_NUMBER, to=to)
 
@@ -925,7 +929,7 @@ async def get_whoop_token() -> str | None:
                 )
                 if should_alert:
                     try:
-                        send_sms(OWNER_PHONE_NUMBER, "WHOOP token refresh failed. Re-auth at /auth/whoop")
+                        send_sms(OWNER_PHONE_NUMBER, "WHOOP token refresh failed. Re-auth at /auth/whoop", proactive=True)
                         _last_whoop_token_alert_at = now
                     except Exception:
                         pass
@@ -1756,7 +1760,7 @@ def build_context_and_call(user_message: str, extra_mem_query: str | None = None
     return call_claude(system_prompt, user_message, conversation_history=history)
 
 
-def process_and_send(claude_response: str, to: str, flow: str | None = None) -> str:
+def process_and_send(claude_response: str, to: str, flow: str | None = None, proactive: bool = False) -> str:
     """Parse meal tags, log food, send SMS, log conversation. Returns clean message."""
     clean_message, meal_data = parse_meal_data(claude_response)
     if meal_data:
@@ -1765,7 +1769,7 @@ def process_and_send(claude_response: str, to: str, flow: str | None = None) -> 
         except Exception as e:
             logger.error(f"Failed to log food: {e}")
     try:
-        send_sms(to=to, body=clean_message)
+        send_sms(to=to, body=clean_message, proactive=proactive)
     except Exception as e:
         logger.error(f"Failed to send SMS: {e}")
     try:
@@ -1956,7 +1960,7 @@ async def handle_morning_planning(step: int, context: dict, user_message: str = 
             "(Easy / Moderate / Hard / Rest) with a one-sentence rationale. Then ask one question: "
             "'Training today?' Keep it under 300 characters total. Be direct and warm."
         )
-        process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="morning_planning")
+        process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="morning_planning", proactive=True)
         set_conversation_state("morning_planning", step=1, context=context)
 
     elif step == 1:
@@ -1971,7 +1975,7 @@ async def handle_morning_planning(step: int, context: dict, user_message: str = 
             set_conversation_state("morning_planning", step=3, context=context)
             await handle_morning_planning(3, context)
         else:
-            send_sms(OWNER_PHONE_NUMBER, "What and when?")
+            send_sms(OWNER_PHONE_NUMBER, "What and when?", proactive=True)
             log_conversation("outbound", "What and when?", flow="morning_planning")
             set_conversation_state("morning_planning", step=2, context=context)
 
@@ -2026,7 +2030,7 @@ async def handle_morning_planning(step: int, context: dict, user_message: str = 
             f"Each meal should show kcal, P/C/F. Format for SMS readability. "
             f"End by asking him to confirm or suggest changes."
         )
-        clean = process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="morning_planning")
+        clean = process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="morning_planning", proactive=True)
 
         try:
             meal_plan_json = {"raw_plan": clean}
@@ -2054,7 +2058,7 @@ async def handle_morning_planning(step: int, context: dict, user_message: str = 
         )
         if "confirm" in classify.strip().lower():
             upsert_daily_plan({"plan_confirmed": True})
-            send_sms(OWNER_PHONE_NUMBER, "Plan locked. I'll check in at noon. 💪")
+            send_sms(OWNER_PHONE_NUMBER, "Plan locked. I'll check in at noon. 💪", proactive=True)
             log_conversation("outbound", "Plan locked. I'll check in at noon. 💪", flow="morning_planning")
             set_conversation_state("free_chat", step=0)
         else:
@@ -2073,7 +2077,7 @@ async def handle_morning_planning(step: int, context: dict, user_message: str = 
                 f"Regenerate the affected meals, keeping the rest. Show updated plan. "
                 f"Ask him to confirm again."
             )
-            clean = process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="morning_planning")
+            clean = process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="morning_planning", proactive=True)
             try:
                 upsert_daily_plan({"meal_plan": {"raw_plan": clean}})
             except Exception as e:
@@ -2105,7 +2109,7 @@ async def handle_midday_checkin() -> str:
         f"Breakfast logged={signals['breakfast_logged']}. Ask if he's logged everything. "
         f"Under 320 characters."
     )
-    return process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="midday_checkin")
+    return process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="midday_checkin", proactive=True)
 
 
 async def handle_evening_checkin() -> str:
@@ -2132,7 +2136,7 @@ async def handle_evening_checkin() -> str:
         f"Check if any meals appear unlogged. "
         f"Ask if he trained as planned. Under 320 characters."
     )
-    return process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="evening_checkin")
+    return process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="evening_checkin", proactive=True)
 
 
 async def handle_post_workout(workout_data: dict | None = None) -> str:
@@ -2163,7 +2167,7 @@ async def handle_post_workout(workout_data: dict | None = None) -> str:
         f"Reference his usual post-workout habits from memories if known. "
         f"End with asking what he had. Under 320 characters."
     )
-    return process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="post_workout")
+    return process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="post_workout", proactive=True)
 
 
 async def handle_night_summary() -> str:
@@ -2192,7 +2196,7 @@ async def handle_night_summary() -> str:
         f"range. If you notice this gap has appeared 3+ times this week (check memories), name the "
         f"pattern directly. Under 400 characters."
     )
-    clean = process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="night_summary")
+    clean = process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="night_summary", proactive=True)
 
     local_today = get_local_today(settings)
     mem0_add([
@@ -2454,7 +2458,7 @@ async def handle_sleep_update_nudge() -> str:
         f"recovery ({whoop_data.get('recovery_score') if whoop_data else 'N/A'}) and today's pace ({daily_metrics['pace_status']}). "
         "Give one concrete behavior for the next meal. Ask one quick confirmation question. Under 300 characters.",
     )
-    return process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="sleep_update")
+    return process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="sleep_update", proactive=True)
 
 
 async def handle_recovery_update_nudge() -> str:
@@ -2473,7 +2477,7 @@ async def handle_recovery_update_nudge() -> str:
         f"and today's remaining calories ({daily_metrics['remaining_calories']}). "
         "Set effort expectation for the day and one specific nutrition action. Under 300 characters.",
     )
-    return process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="recovery_update")
+    return process_and_send(claude_msg, OWNER_PHONE_NUMBER, flow="recovery_update", proactive=True)
 
 
 async def process_whoop_webhook(payload: dict):
